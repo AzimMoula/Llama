@@ -1,0 +1,64 @@
+# Dependencies and build outputs
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.*
+!.env.template
+docker/.env
+
+# Runtime/generated data
+data/
+knowledge/
+tts_temp/
+chatbot.log
+*.log
+plugins/
+use_ollama
+use_npm
+
+# Python cache/venv
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Python tool caches
+.pytest_cache/
+.mypy_cache/
+
+# Docker runtime artifacts and local models
+docker/volume/
+docker/models/
+docker/test.wav
+docker/Running
+docker/Using
+
+# Root runtime marker files
+/Running
+/Using
+
+# Docker/container ID marker files (12-char lowercase hex)
+/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
+/docker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
+
+# Model binaries
+*.gguf
+*.pt
+
+# Existing project-specific artifacts
+emoji_svg
+NotoSansSC-Bold.ttf
+cloud-api/speech.mp3
+python/emoji_svg.zip
+python/status-bar-icon/__pycache__/
+python/__pycache__/
+
+# Editor/OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
