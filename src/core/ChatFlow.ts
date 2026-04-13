@@ -177,6 +177,18 @@ class ChatFlow implements ChatFlowContext {
             .map((obj) => `${obj.count} ${obj.name}`)
             .join(", ");
 
+          const sceneText = (data.scene || "").toLowerCase();
+          const unavailableScene =
+            sceneText.includes("camera unavailable") ||
+            sceneText.includes("no camera stream") ||
+            sceneText.includes("retrying camera sources") ||
+            sceneText.includes("vision error") ||
+            sceneText.includes("initializing");
+
+          if (unavailableScene && !objectSummary) {
+            throw new Error("YOLO scene is temporarily unavailable");
+          }
+
           const compactColors = (data.color_observations || [])
             .slice(0, 5)
             .map((obs) =>

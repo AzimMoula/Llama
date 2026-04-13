@@ -45,10 +45,13 @@ UPDATE_INTERVAL = (1.0 / UPDATE_FPS) if UPDATE_FPS > 0 else 0.0
 TEST_HOLD_SECONDS = float(os.getenv("YOLO_TEST_HOLD_SECONDS", "0.5"))
 CAMERA_RETRY_SECONDS = float(os.getenv("YOLO_CAMERA_RETRY_SECONDS", "2.0"))
 CAMERA_FAILURE_LOG_INTERVAL = float(os.getenv("YOLO_CAMERA_FAILURE_LOG_INTERVAL", "5.0"))
+CAPTURE_WIDTH = int(os.getenv("YOLO_CAPTURE_WIDTH", "640"))
+CAPTURE_HEIGHT = int(os.getenv("YOLO_CAPTURE_HEIGHT", "480"))
+CAPTURE_FPS = float(os.getenv("YOLO_CAPTURE_FPS", "30"))
 
 
 def _parse_camera_source(raw: str):
-    value = raw.strip()
+    value = raw.strip().strip('"').strip("'")
     if not value:
         return None
     if value.isdigit():
@@ -83,9 +86,10 @@ def _source_exists(source) -> bool:
     # Integer sources map to /dev/videoN on Linux/OpenCV V4L2.
     if isinstance(source, int):
         return os.path.exists(f"/dev/video{source}")
-    # Local V4L path sources should exist before trying model.predict.
+    # For path sources, let OpenCV try opening even if exists checks are flaky.
+    # This avoids false negatives from transient device node races.
     if isinstance(source, str) and source.startswith("/dev/"):
-        return os.path.exists(source)
+        return True
     # For URLs / pipelines we cannot pre-validate here.
     return True
 
@@ -93,6 +97,75 @@ def _source_exists(source) -> bool:
 def _list_visible_video_nodes() -> str:
     nodes = sorted(glob.glob("/dev/video*"))
     return ", ".join(nodes) if nodes else "none"
+
+
+def _is_local_camera_source(source) -> bool:
+    if isinstance(source, int):
+        return True
+    if isinstance(source, str) and source.startswith("/dev/video"):
+        return True
+    return False
+
+
+def _open_local_capture(source):
+    api = cv2.CAP_V4L2
+    cap = None
+
+    if isinstance(source, int):
+        cap = cv2.VideoCapture(source, api)
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(f"/dev/video{source}", api)
+    else:
+        cap = cv2.VideoCapture(source, api)
+
+    if cap and cap.isOpened():
+        # Keep capture latency low on embedded devices.
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+        cap.set(cv2.CAP_PROP_FPS, CAPTURE_FPS)
+    return cap
+
+
+def _iter_local_camera_results(source):
+    warmup_frames = max(0, int(os.getenv("YOLO_CAMERA_WARMUP_FRAMES", "5")))
+    max_read_failures = max(1, int(os.getenv("YOLO_CAMERA_MAX_READ_FAILURES", "8")))
+
+    cap = _open_local_capture(source)
+    if not cap or not cap.isOpened():
+        raise RuntimeError(f"Unable to open camera source: {source}")
+
+    try:
+        for _ in range(warmup_frames):
+            cap.read()
+
+        read_failures = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None or frame.size == 0:
+                read_failures += 1
+                if read_failures >= max_read_failures:
+                    raise RuntimeError(f"Failed to read images from {source}")
+                time.sleep(0.05)
+                continue
+
+            read_failures = 0
+            predictions = model.predict(
+                source=frame,
+                show=False,
+                conf=CONFIDENCE,
+                iou=IOU,
+                imgsz=IMG_SIZE,
+                max_det=MAX_DET,
+                device=DEVICE,
+                half=USE_HALF,
+                verbose=False,
+            )
+            if predictions:
+                yield predictions[0]
+    finally:
+        cap.release()
 
 # Optional HSV color detection that can be fused with YOLO detections.
 COLOR_DETECTION = os.getenv("COLOR_DETECTION", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -448,6 +521,19 @@ def vision_loop():
         old_stdout.write(msg + "\n")
         old_stdout.flush()
 
+    def has_stable_scene() -> bool:
+        with scene_lock:
+            scene = str(latest_payload.get("scene", "") or "")
+            objects = latest_payload.get("objects") or []
+        unavailable_tokens = (
+            "camera unavailable",
+            "no camera stream",
+            "retrying camera sources",
+            "vision error",
+            "initializing",
+        )
+        return bool(objects) and not any(token in scene.lower() for token in unavailable_tokens)
+
     try:
         # Suppress YOLO verbose output for the whole streaming loop.
         sys.stdout = io.StringIO()
@@ -468,20 +554,24 @@ def vision_loop():
                         continue
 
                     user_print(f"[VISION] Trying camera source: {source}")
-                    # stream=True keeps camera ownership in one loop and avoids open/close races.
-                    results = model.predict(
-                        source=source,
-                        show=False,
-                        stream=True,
-                        conf=CONFIDENCE,
-                        iou=IOU,
-                        imgsz=IMG_SIZE,
-                        max_det=MAX_DET,
-                        vid_stride=VID_STRIDE,
-                        device=DEVICE,
-                        half=USE_HALF,
-                        verbose=False,
-                    )
+                    # For local cameras, use direct OpenCV capture for better V4L2 stability.
+                    if _is_local_camera_source(source):
+                        results = _iter_local_camera_results(source)
+                    else:
+                        # stream=True keeps camera ownership in one loop and avoids open/close races.
+                        results = model.predict(
+                            source=source,
+                            show=False,
+                            stream=True,
+                            conf=CONFIDENCE,
+                            iou=IOU,
+                            imgsz=IMG_SIZE,
+                            max_det=MAX_DET,
+                            vid_stride=VID_STRIDE,
+                            device=DEVICE,
+                            half=USE_HALF,
+                            verbose=False,
+                        )
 
                     source_is_active = False
 
@@ -581,16 +671,18 @@ def vision_loop():
                         last_source_error_log[source] = now
 
             if not stream_started:
-                with scene_lock:
-                    latest_scene = "Vision camera unavailable. Retrying camera sources..."
-                    latest_payload = {
-                        "scene": latest_scene,
-                        "objects": [],
-                        "color_observations": [],
-                        "inference_ms": None,
-                        "device": DEVICE,
-                        "pipeline_fps": None,
-                    }
+                # Preserve last good detections during temporary camera dropouts.
+                if not has_stable_scene():
+                    with scene_lock:
+                        latest_scene = "Vision camera unavailable. Retrying camera sources..."
+                        latest_payload = {
+                            "scene": latest_scene,
+                            "objects": [],
+                            "color_observations": [],
+                            "inference_ms": None,
+                            "device": DEVICE,
+                            "pipeline_fps": None,
+                        }
                 now = time.monotonic()
                 if (now - last_no_camera_log) >= CAMERA_FAILURE_LOG_INTERVAL:
                     user_print(
