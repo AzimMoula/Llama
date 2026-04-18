@@ -1,0 +1,17 @@
+# Ignore AI models
+**/*.gguf
+**/*.pt
+**/*.bin
+**/*.safetensors
+**/*.onnx
+
+# Ignore local volumes and Git data
+volume/
+**/volume/
+docker/volume/
+docker/models/
+docker/faster-whisper-http/
+data/
+.gitmodules
+.git/
+node_modules/

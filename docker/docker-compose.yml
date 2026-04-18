@@ -1,0 +1,415 @@
+# version: "2.3"
+# services:
+#   chatbot:
+#     build:
+#       context: ..
+#       dockerfile: Dockerfile
+#     image: whisplay-chatbot-http
+#     container_name: whisplay-chatbot
+#     working_dir: /app
+#     environment:
+#       - NODE_ENV=production
+#       - ENABLE_CAMERA=true
+#       - AUDIODEV=hw:tegrasndt210ref,0
+#       - AUDIODRIVER=alsa
+#       - VISION_FETCH_TIMEOUT_MS=3000
+#       - VISION_FETCH_RETRY_COUNT=3
+#       - VISION_FETCH_RETRY_DELAY_MS=350
+#       - CHAT_HISTORY_RESET_TIME=1
+#       - SYSTEM_PROMPT=You are a concise assistant. Never invent visual details. When camera ground truth is provided in system messages, use only that for scene/object/color claims.
+#       - OPENAI_USE_STREAM=true
+#       - OPENAI_ENABLE_TOOLS=false
+#       - OPENAI_LLM_MODEL=tinyllama
+#       - OPENAI_MAX_TOKENS=48
+#       - OPENAI_TEMPERATURE=0.15
+#       - OPENAI_TOP_P=0.9
+#       - TTS_CHUNK_MAX_CHARS=42
+#       - TTS_CHUNK_MAX_WAIT_MS=500
+#     volumes:
+#       - ../:/app
+#       - /app/node_modules
+#       - ./asound.conf:/etc/asound.conf
+#     ports:
+#       - "17880:17880"
+#     privileged: true
+#     devices:                     
+#       - "/dev/snd:/dev/snd"
+#     # Run directly from src to avoid stale dist/ code while iterating over SSH.
+#     command: ["node", "-r", "ts-node/register/transpile-only", "-r", "tsconfig-paths/register", "src/index.ts"]
+
+#   # ollama:
+#   #   image: ollama/ollama:latest
+#   #   container_name: ollama
+#   #   restart: unless-stopped
+#   #   ports:
+#   #     - "11434:11434"
+#   #   volumes:
+#   #     - ./volume/ollama:/root/.ollama
+#   #     - ./models:/models
+#   #   environment:
+#   #     - OLLAMA_KEEP_ALIVE=-1
+#   #     - NVIDIA_VISIBLE_DEVICES=all
+#   #     - NVIDIA_DRIVER_CAPABILITIES=all
+#   #     - LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu
+
+#     # command: >
+#     #   bash -c "pip install flask opencv-python-headless ultralytics && python app.py"
+#   # yolo-vision:
+#   #   image: python:3.9-slim
+#   #   container_name: yolo-vision
+#   #   restart: unless-stopped
+#   #   privileged: true
+#   #   devices:
+#   #     - "/dev/video0:/dev/video0"
+#   #   # volumes:
+#   #   #   - /home/tsig/Desktop/MajorProject/whisplay-ai-chatbot-master/yolo-vision:/app
+#   #   # volumes:
+#   #   #   - ../yolo-vision:/app
+#   #   working_dir: /app
+#   #   # command: >
+#   #   #   bash -c "apt-get update && apt-get install -y libglib2.0-0 libgl1 libxcb1 && pip install -r requirements.txt && python app.py"
+#   #   command: python app.py
+    
+#   #   ports:
+#   #     - "5000:5000"
+
+#   yolo-vision:
+#     build: 
+#       context: ../yolo-vision
+#     container_name: yolo-vision
+#     restart: unless-stopped
+#     privileged: true
+#     devices:
+#       - "/dev/video0:/dev/video0"
+#       - "/dev/video1:/dev/video1"
+#     ports:
+#       - "5000:5000"
+#     environment:
+#       - YOLO_CAMERA_SOURCES=0,1,/dev/video0,/dev/video1
+#       - YOLO_CAMERA_RETRY_SECONDS=2.0
+#       - YOLO_CAMERA_FAILURE_LOG_INTERVAL=5.0
+#       - COLOR_DETECTION=1
+#       - COLOR_TARGETS=red,blue,green,yellow,orange
+#       - COLOR_OBJECT_CLASSES=sports ball,bottle,cup
+#       - COLOR_MIN_PIXELS=60
+#       - COLOR_MIN_RATIO=0.06
+#       - COLOR_DOMINANCE=1.1
+#       - COLOR_MIN_SAT=50
+#       - COLOR_MIN_VAL=45
+#       - COLOR_CENTER_CROP=0.8
+#       - COLOR_FALLBACK_CLASSES=sports ball
+#       - COLOR_FALLBACK_MIN_PIXELS=20
+#       - COLOR_FALLBACK_MIN_RATIO=0.02
+#       - COLOR_WINDOW=8
+#       - COLOR_MIN_APPEAR_RATIO=0.4
+#       # Optional custom HSV ranges (format: H,S,V-H,S,V;H,S,V-H,S,V)
+#       - HSV_RED_RANGES=0,120,70-10,255,255;170,120,70-180,255,255
+#       - HSV_BLUE_RANGES=90,80,50-145,255,255
+#       - HSV_GREEN_RANGES=35,80,60-85,255,255
+#       - HSV_YELLOW_RANGES=20,100,100-35,255,255
+#       - HSV_ORANGE_RANGES=8,110,90-22,255,255
+#     volumes:
+#       - ../yolo-vision:/app  # We map the volume so you can edit app.py live
+
+#   llm-engine:
+#     image: acerbetti/l4t-jetpack-llama-cpp-python:latest
+#     container_name: llm-engine
+#     restart: unless-stopped
+#     cap_add:
+#       - IPC_LOCK
+#     ulimits:
+#       memlock: -1
+#     ports:
+#       - "8000:8000"
+#     volumes:
+#       - ./models:/models
+#     command: >
+#       python3 -m llama_cpp.server 
+#       --model /models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+#       --n_gpu_layers 20
+#       --n_ctx 512 
+#       --n_batch 256
+#       --host 0.0.0.0
+
+#   faster-whisper:
+#     build:
+#       context: ./faster-whisper-http
+#       dockerfile: Dockerfile
+#       args:
+#         MODEL_SIZE: tiny
+#     image: faster-whisper-http
+#     container_name: faster-whisper
+#     restart: unless-stopped
+#     environment:
+#       - NVIDIA_VISIBLE_DEVICES=all
+#       - NVIDIA_DRIVER_CAPABILITIES=all
+#       - LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu
+#       - FASTER_WHISPER_DEVICE=auto
+#       - FASTER_WHISPER_COMPUTE_TYPE=int8
+#       - FASTER_WHISPER_CPU_THREADS=4
+#       - FASTER_WHISPER_VAD_FILTER=true
+#       - FASTER_WHISPER_BEAM_SIZE=1
+#       - FASTER_WHISPER_BEST_OF=1
+#       - FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT=false
+#     volumes:
+#       - ./volume/faster-whisper:/data
+#     ports:
+#       - "8803:8803"
+
+#   piper-http:
+#     build:
+#       context: ./piper-http
+#       dockerfile: Dockerfile
+#       args:
+#         VOICE_NAME: en_US-amy-medium
+#         # HTTPS_PROXY: http://host.docker.internal:7890
+#     image: piper-http
+#     container_name: piper-http
+#     restart: unless-stopped
+#     ports:
+#       - "8805:8805"
+#     volumes:
+#       - ./volume/piper:/data
+
+# # To start all services, run:
+# # docker-compose -f docker/docker-compose.full.yml up --build
+
+
+###the changes are from here
+version: "2.3"
+services:
+  chatbot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: whisplay-chatbot-http
+    container_name: whisplay-chatbot
+    working_dir: /app
+    environment:
+      - NODE_ENV=production
+      - WAKE_WORD_ENABLED=true
+      - WAKE_WORDS=sora,so ra,sorah,zora,soraa
+      - WAKE_WORD_THRESHOLD=0.45
+      - WAKE_WORD_COOLDOWN_SEC=1.5
+      - WAKE_WORD_ASR_FALLBACK=true
+      - WAKE_WORD_ASR_ENDPOINT=http://faster-whisper:8803/recognize
+      - WAKE_WORD_ASR_LANGUAGE=en
+      - WAKE_WORD_AUDIO_DEVICE=hw:tegrasndt210ref,0
+      - WAKE_WORD_ASR_GAIN_DB=18
+      - WAKE_WORD_RECORD_GAIN_DB=18
+      - WAKE_WORD_ASR_TIMEOUT_SEC=12.0
+      - WAKE_WORD_ASR_CHUNK_SEC=2.2
+      - WAKE_WORD_ASR_MIN_INTERVAL_SEC=1.8
+      - WAKE_WORD_ASR_MIN_RMS=18
+      - WAKE_WORD_ASR_MIN_PEAK=180
+      - WAKE_WORD_ASR_MIN_VOICED_AMP=120
+      - WAKE_WORD_ASR_MIN_VOICED_RATIO=0.002
+      - WAKE_WORD_ASR_TIMEOUT_BACKOFF_SEC=4.0
+      - WAKE_WORD_ASR_MAX_BACKOFF_SEC=15.0
+      - WAKE_WORD_ASR_ERROR_BACKOFF_SEC=8.0
+      - WAKE_WORD_ASR_MAX_ERROR_BACKOFF_SEC=60.0
+      - WAKE_WORD_ASR_RETRIES=0
+      - WAKE_WORD_ASR_RETRY_TIMEOUT_MULTIPLIER=1.5
+      - WAKE_WORD_ASR_BYPASS_GATING=false
+      - WAKE_WORD_ASR_TOKEN_DISTANCE_LIMIT=2
+      - WAKE_WORD_ASR_MATCH_WINDOW_SEC=5.5
+      - WAKE_WORD_ASR_EXTRA_PHRASES=sora,so ra,sorah,sorra,zora,soraa,hey sora,hi sora,ok sora,okay sora,heysora,oksora
+      - WAKE_WORD_ASR_TARGET_TOKENS=sora,zora,sorah,sorra,soraa
+      - WAKE_WORD_ASR_ALLOW_SINGLE_TARGET=true
+      - WAKE_WORD_ASR_STRICT_REQUIRE_HEY=false
+      - WAKE_WORD_ASR_STRICT_REQUIRE_PREFIX=false
+      - WAKE_WORD_ASR_PREFIX_TOKENS=ok,okay,hey,hi
+      - WAKE_WORD_ASR_TRACE_TRANSCRIPTS=true
+      - WAKE_WORD_ASR_LOG_ALL_TRANSCRIPTS=true
+      - WAKE_WORD_ASR_COMPACT_IDLE_LOG=true
+      - WAKE_WORD_ASR_DEBUG=true
+      - WAKE_WORD_ASR_DEBUG_LOG_INTERVAL_SEC=2.0
+      - FASTER_WHISPER_REQUEST_TYPE=base64
+      - WAKE_WORD_IDLE_TIMEOUT_SEC=60
+      - WAKE_WORD_LISTEN_SEC=6
+      - WAKE_WORD_MIC_RELEASE_DELAY_MS=120
+      - WAKE_WORD_RESTART_DELAY_MS=2000
+      - WAKE_WORD_CONTINUE_ON_EMPTY_ASR=false
+      - WAKE_WORD_CONTINUE_SESSION_AFTER_ANSWER=false
+      - WAKE_WORD_EARLY_STOP_ON_SILENCE=false
+      - WAKE_WORD_EARLY_STOP_MIN_DURATION_SEC=9
+      - WAKE_WORD_EARLY_STOP_SILENCE_SEC=0.7
+      - WAKE_WORD_EARLY_STOP_LEVEL_PERCENT=1.2
+      - WAKE_WORD_RECORD_MAX_SEC=20
+      - WHISPLAY_MIN_MANUAL_RECORD_MS=700
+      - WHISPLAY_MAX_MANUAL_LISTEN_MS=9000
+      - WHISPLAY_MANUAL_RECORD_GAIN_DB=14
+      - ENABLE_CAMERA=true
+      - WHISPLAY_CAMERA_DAEMON_ENABLED=false
+      - AUDIODEV=hw:tegrasndt210ref,0
+      - AUDIO_INPUT_CHANNEL=1
+      - AUDIO_INPUT_HIGHPASS_HZ=70
+      - AUDIO_INPUT_LOWPASS_HZ=7000
+      - AUDIODRIVER=alsa
+      - VISION_FETCH_TIMEOUT_MS=3000
+      - VISION_FETCH_RETRY_COUNT=3
+      - VISION_FETCH_RETRY_DELAY_MS=350
+      - CHAT_HISTORY_RESET_TIME=1
+      - SYSTEM_PROMPT=You are a concise assistant. Never invent visual details. When camera ground truth is provided in system messages, use only that for scene/object/color claims.
+      - OPENAI_USE_STREAM=true
+      - OPENAI_ENABLE_TOOLS=false
+      - OPENAI_LLM_MODEL=tinyllama
+      - OPENAI_MAX_TOKENS=48
+      - OPENAI_TEMPERATURE=0.15
+      - OPENAI_TOP_P=0.9
+      - WHISPLAY_ASR_TIMEOUT_MS=35000
+      - FASTER_WHISPER_HTTP_TIMEOUT_MS=25000
+      - TTS_CHUNK_MAX_CHARS=22
+      - TTS_CHUNK_MAX_WAIT_MS=120
+    volumes:
+      - ../:/app
+      - /app/node_modules
+      - ./asound.conf:/etc/asound.conf
+    ports:
+      - "17880:17880"
+    privileged: true
+    devices:                     
+      - "/dev/snd:/dev/snd"
+    depends_on:
+      faster-whisper:
+        condition: service_healthy
+    # Run directly from src to avoid stale dist/ code while iterating over SSH.
+    command: ["node", "-r", "ts-node/register/transpile-only", "-r", "tsconfig-paths/register", "src/index.ts"]
+
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ./volume/ollama:/root/.ollama
+  #     - ./models:/models
+  #   environment:
+  #     - OLLAMA_KEEP_ALIVE=-1
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #     - NVIDIA_DRIVER_CAPABILITIES=all
+  #     - LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu
+
+    # command: >
+    #   bash -c "pip install flask opencv-python-headless ultralytics && python app.py"
+  # yolo-vision:
+  #   image: python:3.9-slim
+  #   container_name: yolo-vision
+  #   restart: unless-stopped
+  #   privileged: true
+  #   devices:
+  #     - "/dev/video0:/dev/video0"
+  #   # volumes:
+  #   #   - /home/tsig/Desktop/MajorProject/whisplay-ai-chatbot-master/yolo-vision:/app
+  #   # volumes:
+  #   #   - ../yolo-vision:/app
+  #   working_dir: /app
+  #   # command: >
+  #   #   bash -c "apt-get update && apt-get install -y libglib2.0-0 libgl1 libxcb1 && pip install -r requirements.txt && python app.py"
+  #   command: python app.py
+    
+  #   ports:
+  #     - "5000:5000"
+
+  yolo-vision:
+    build: 
+      context: ../yolo-vision
+    container_name: yolo-vision
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - "/dev/video0:/dev/video0"
+      - "/dev/video1:/dev/video1"
+    ports:
+      - "5000:5000"
+    environment:
+      - YOLO_CAMERA_SOURCES=0
+      - YOLO_CAMERA_RETRY_SECONDS=2.0
+      - YOLO_CAMERA_FAILURE_LOG_INTERVAL=5.0
+      - COLOR_DETECTION=1
+      - COLOR_TARGETS=red,blue,green,yellow,orange
+      - COLOR_OBJECT_CLASSES=sports ball,bottle,cup
+      - COLOR_MIN_PIXELS=60
+      - COLOR_MIN_RATIO=0.06
+      - COLOR_DOMINANCE=1.1
+      - COLOR_MIN_SAT=50
+      - COLOR_MIN_VAL=45
+      - COLOR_CENTER_CROP=0.8
+      - COLOR_FALLBACK_CLASSES=sports ball
+      - COLOR_FALLBACK_MIN_PIXELS=20
+      - COLOR_FALLBACK_MIN_RATIO=0.02
+      - COLOR_WINDOW=8
+      - COLOR_MIN_APPEAR_RATIO=0.4
+      # Optional custom HSV ranges (format: H,S,V-H,S,V;H,S,V-H,S,V)
+      - HSV_RED_RANGES=0,120,70-10,255,255;170,120,70-180,255,255
+      - HSV_BLUE_RANGES=90,80,50-145,255,255
+      - HSV_GREEN_RANGES=35,80,60-85,255,255
+      - HSV_YELLOW_RANGES=20,100,100-35,255,255
+      - HSV_ORANGE_RANGES=8,110,90-22,255,255
+    volumes:
+      - ../yolo-vision:/app  # We map the volume so you can edit app.py live
+
+  llm-engine:
+    image: acerbetti/l4t-jetpack-llama-cpp-python:latest
+    container_name: llm-engine
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock: -1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/models
+    command: >
+      python3 -m llama_cpp.server 
+      --model /models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf
+      --n_gpu_layers 20
+      --n_ctx 512 
+      --n_batch 256
+      --host 0.0.0.0
+
+  faster-whisper:
+    build:
+      context: ./faster-whisper-http
+      dockerfile: Dockerfile
+      args:
+        MODEL_SIZE: tiny
+    image: faster-whisper-http
+    container_name: faster-whisper
+    restart: unless-stopped
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu
+      - FASTER_WHISPER_CPU_THREADS=4
+      - FASTER_WHISPER_VAD_FILTER=false
+    volumes:
+      - ./volume/faster-whisper:/data
+    ports:
+      - "8803:8803"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', 8803)); s.close(); sys.exit(0)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  piper-http:
+    build:
+      context: ./piper-http
+      dockerfile: Dockerfile
+      args:
+        VOICE_NAME: en_US-amy-medium
+        # HTTPS_PROXY: http://host.docker.internal:7890
+    image: piper-http
+    container_name: piper-http
+    restart: unless-stopped
+    ports:
+      - "8805:8805"
+    volumes:
+      - ./volume/piper:/data
+
+# To start all services, run:
+# docker-compose -f docker/docker-compose.full.yml up --build
