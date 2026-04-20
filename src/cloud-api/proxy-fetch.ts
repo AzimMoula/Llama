@@ -8,6 +8,40 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+const offlineOnly = (process.env.OFFLINE_ONLY || "true").toLowerCase() === "true";
+
+const isLocalHostname = (hostname: string): boolean => {
+  const host = hostname.trim().toLowerCase();
+  return (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "0.0.0.0" ||
+    host === "::1" ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    host.endsWith(".docker.internal") ||
+    host === "llm-engine" ||
+    host === "faster-whisper" ||
+    host === "piper-http" ||
+    host === "yolo-vision" ||
+    host === "qdrant" ||
+    host === "ollama"
+  );
+};
+
+const assertOfflineAllowedUrl = (urlStr: string): void => {
+  if (!offlineOnly) return;
+  let parsed: URL;
+  try {
+    parsed = new URL(urlStr);
+  } catch {
+    throw new Error(`[OFFLINE_ONLY] Refusing non-URL request: ${urlStr}`);
+  }
+  if (!isLocalHostname(parsed.hostname)) {
+    throw new Error(`[OFFLINE_ONLY] Blocked outbound request to non-local host: ${parsed.hostname}`);
+  }
+};
+
 /**
  * Automatically creates a proxy-enabled version of node-fetch
  * based on system environment variables (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY).
@@ -33,6 +67,7 @@ function createProxyFetch() {
     url: string,
     options: RequestInit = {}
   ): Promise<Response> {
+    assertOfflineAllowedUrl(url);
     return fetch(url, { agent, ...options });
   };
 }
@@ -59,6 +94,7 @@ function createUndiciProxyFetch() {
     url: string,
     options: RequestInit = {}
   ) {
+    assertOfflineAllowedUrl(url);
     // @ts-ignore
     return UndiciFetch(url, { dispatcher, ...options });
   };

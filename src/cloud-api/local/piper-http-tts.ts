@@ -18,6 +18,25 @@ const piperHttpLengthScale =
 
 const ttsServer = (process.env.TTS_SERVER || "").toLowerCase();
 
+const buildPiperHttpUrl = (): string => {
+  const hostRaw = (piperHttpHost || "").trim();
+  const portRaw = (piperHttpPort || "").trim();
+
+  // Allow full URL in host env (e.g. http://piper-http:8805).
+  if (hostRaw.startsWith("http://") || hostRaw.startsWith("https://")) {
+    return hostRaw.replace(/\/$/, "");
+  }
+
+  // Allow host to include port already (e.g. piper-http:8805).
+  if (/:[0-9]+$/.test(hostRaw)) {
+    return `http://${hostRaw}`;
+  }
+
+  return `http://${hostRaw}:${portRaw}`;
+};
+
+const piperHttpUrl = buildPiperHttpUrl();
+
 let pyProcess: ChildProcess | null = null;
 if (ttsServer === TTSServer.piperhttp) {
   if (
@@ -57,25 +76,32 @@ const piperHttpTTS = async (
     // text may contain double quotes, need to escape them
     const escapedText = text.replace(/"/g, '\\"');
 
-    const piperProcess = spawn('curl', [
+    const curlArgs = [
       "-X",
       "POST",
+      "--silent",
+      "--show-error",
+      "--fail",
       "-H",
       "Content-Type: application/json",
       "-d",
       `{ "text": "${escapedText}", "length_scale": ${piperHttpLengthScale} }`,
       "-o",
       tempWavFile,
-      `${piperHttpHost}:${piperHttpPort}`
-    ]);
+      piperHttpUrl,
+    ];
+    const piperProcess = spawn("curl", curlArgs);
 
-    piperProcess.stdin.write(text);
-    piperProcess.stdin.end();
+    let stderrText = "";
+    piperProcess.stderr.on("data", (chunk: Buffer) => {
+      stderrText += chunk.toString();
+    });
 
     piperProcess.on("close", async (code: number) => {
       if (code !== 0) {
-        // reject(new Error(`Piper process exited with code ${code}`));
-        console.error(`Piper process exited with code ${code}`);
+        console.error(
+          `Piper process exited with code ${code}. url=${piperHttpUrl} stderr=${stderrText.trim() || "<empty>"}`,
+        );
         resolve({ duration: 0 });
         return;
       }

@@ -187,6 +187,7 @@ services:
     working_dir: /app
     environment:
       - NODE_ENV=production
+      - OFFLINE_ONLY=true
       - WAKE_WORD_ENABLED=true
       - WAKE_WORDS=sora,so ra,sorah,zora,soraa
       - WAKE_WORD_THRESHOLD=0.45
@@ -200,8 +201,8 @@ services:
       - WAKE_WORD_ASR_TIMEOUT_SEC=12.0
       - WAKE_WORD_ASR_CHUNK_SEC=2.2
       - WAKE_WORD_ASR_MIN_INTERVAL_SEC=1.8
-      - WAKE_WORD_ASR_MIN_RMS=18
-      - WAKE_WORD_ASR_MIN_PEAK=180
+      - WAKE_WORD_ASR_MIN_RMS=150
+      - WAKE_WORD_ASR_MIN_PEAK=1500
       - WAKE_WORD_ASR_MIN_VOICED_AMP=120
       - WAKE_WORD_ASR_MIN_VOICED_RATIO=0.002
       - WAKE_WORD_ASR_TIMEOUT_BACKOFF_SEC=4.0
@@ -226,7 +227,7 @@ services:
       - WAKE_WORD_ASR_DEBUG_LOG_INTERVAL_SEC=2.0
       - FASTER_WHISPER_REQUEST_TYPE=base64
       - WAKE_WORD_IDLE_TIMEOUT_SEC=60
-      - WAKE_WORD_LISTEN_SEC=6
+      - WAKE_WORD_LISTEN_SEC=8
       - WAKE_WORD_MIC_RELEASE_DELAY_MS=120
       - WAKE_WORD_RESTART_DELAY_MS=2000
       - WAKE_WORD_CONTINUE_ON_EMPTY_ASR=false
@@ -237,20 +238,23 @@ services:
       - WAKE_WORD_EARLY_STOP_LEVEL_PERCENT=1.2
       - WAKE_WORD_RECORD_MAX_SEC=20
       - WHISPLAY_MIN_MANUAL_RECORD_MS=700
-      - WHISPLAY_MAX_MANUAL_LISTEN_MS=9000
+      - WHISPLAY_MAX_MANUAL_LISTEN_MS=12000
       - WHISPLAY_MANUAL_RECORD_GAIN_DB=14
       - ENABLE_CAMERA=true
       - WHISPLAY_CAMERA_DAEMON_ENABLED=false
       - AUDIODEV=hw:tegrasndt210ref,0
       - AUDIO_INPUT_CHANNEL=1
-      - AUDIO_INPUT_HIGHPASS_HZ=70
-      - AUDIO_INPUT_LOWPASS_HZ=7000
+      - AUDIO_INPUT_HIGHPASS_HZ=45
+      - AUDIO_INPUT_LOWPASS_HZ=7800
       - AUDIODRIVER=alsa
       - VISION_FETCH_TIMEOUT_MS=3000
       - VISION_FETCH_RETRY_COUNT=3
       - VISION_FETCH_RETRY_DELAY_MS=350
       - CHAT_HISTORY_RESET_TIME=1
       - SYSTEM_PROMPT=You are a concise assistant. Never invent visual details. When camera ground truth is provided in system messages, use only that for scene/object/color claims.
+      - LLM_SERVER=openai
+      - OPENAI_API_KEY=sk-local
+      - OPENAI_API_BASE_URL=http://llm-engine:8000/v1
       - OPENAI_USE_STREAM=true
       - OPENAI_ENABLE_TOOLS=false
       - OPENAI_LLM_MODEL=tinyllama
@@ -259,8 +263,11 @@ services:
       - OPENAI_TOP_P=0.9
       - WHISPLAY_ASR_TIMEOUT_MS=35000
       - FASTER_WHISPER_HTTP_TIMEOUT_MS=25000
-      - TTS_CHUNK_MAX_CHARS=22
-      - TTS_CHUNK_MAX_WAIT_MS=120
+      - PIPER_HTTP_HOST=piper-http
+      - PIPER_HTTP_PORT=8805
+      - TTS_CHUNK_MAX_CHARS=56
+      - TTS_CHUNK_MAX_WAIT_MS=220
+      - ANSWER_MAX_DURATION_SEC=10
     volumes:
       - ../:/app
       - /app/node_modules
@@ -272,6 +279,12 @@ services:
       - "/dev/snd:/dev/snd"
     depends_on:
       faster-whisper:
+        condition: service_healthy
+      yolo-vision:
+        condition: service_started
+      piper-http:
+        condition: service_started
+      llm-engine:
         condition: service_healthy
     # Run directly from src to avoid stale dist/ code while iterating over SSH.
     command: ["node", "-r", "ts-node/register/transpile-only", "-r", "tsconfig-paths/register", "src/index.ts"]
@@ -324,9 +337,10 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - YOLO_CAMERA_SOURCES=0
+      - YOLO_CAMERA_SOURCES=0,1,/dev/video0,/dev/video1
       - YOLO_CAMERA_RETRY_SECONDS=2.0
       - YOLO_CAMERA_FAILURE_LOG_INTERVAL=5.0
+      - YOLO_CAMERA_WARMUP_FRAMES=10
       - COLOR_DETECTION=1
       - COLOR_TARGETS=red,blue,green,yellow,orange
       - COLOR_OBJECT_CLASSES=sports ball,bottle,cup
@@ -369,6 +383,12 @@ services:
       --n_ctx 512 
       --n_batch 256
       --host 0.0.0.0
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/v1/models', timeout=3); sys.exit(0)"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
 
   faster-whisper:
     build:

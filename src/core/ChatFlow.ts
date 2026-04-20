@@ -34,6 +34,10 @@ class ChatFlow implements ChatFlowContext {
   wakeSessionActive: boolean = false;
   wakeSessionStartAt: number = 0;
   wakeSessionLastSpeechAt: number = 0;
+  answerTimeoutMs: number =
+    parseInt(process.env.ANSWER_MAX_DURATION_SEC || "10", 10) * 1000;
+  answerTimeoutTimer: NodeJS.Timeout | null = null;
+  answerTimeoutArmedFlow: "answer" | "external_answer" | null = null;
   wakeSessionIdleTimeoutMs: number =
     parseInt(process.env.WAKE_WORD_IDLE_TIMEOUT_SEC || "60") * 1000;
   wakeRecordMaxSec: number = parseInt(
@@ -91,6 +95,13 @@ class ChatFlow implements ChatFlowContext {
       ({ charEnd, durationMs }) => {
         if (!this.isAnswerFlow()) return;
         if (!durationMs || durationMs <= 0) return;
+        // Start timeout when audio actually starts playing, not when answer state begins.
+        if (
+          this.currentFlowName === "answer" ||
+          this.currentFlowName === "external_answer"
+        ) {
+          this.armAnswerTimeout(this.currentFlowName);
+        }
         display({
           scroll_sync: {
             char_end: charEnd,
@@ -303,7 +314,41 @@ class ChatFlow implements ChatFlowContext {
     this.wakeWordListener.stop();
   };
 
+  clearAnswerTimeout = (): void => {
+    if (this.answerTimeoutTimer) {
+      clearTimeout(this.answerTimeoutTimer);
+      this.answerTimeoutTimer = null;
+    }
+    this.answerTimeoutArmedFlow = null;
+  };
+
+  armAnswerTimeout = (flowName: "answer" | "external_answer"): void => {
+    if (this.answerTimeoutTimer && this.answerTimeoutArmedFlow === flowName) {
+      return;
+    }
+    this.clearAnswerTimeout();
+    if (!Number.isFinite(this.answerTimeoutMs) || this.answerTimeoutMs <= 0) {
+      return;
+    }
+    this.answerTimeoutArmedFlow = flowName;
+    this.answerTimeoutTimer = setTimeout(() => {
+      if (this.currentFlowName !== flowName) return;
+      console.log(
+        `[Answer] Max duration ${this.answerTimeoutMs}ms reached. Returning to sleep.`,
+      );
+      // Invalidate in-flight callbacks for this answer turn.
+      this.answerId += 1;
+      this.streamResponser.stopAfterCurrentChunk();
+      if (this.wakeSessionActive) {
+        this.endWakeSession();
+      }
+    }, this.answerTimeoutMs);
+  };
+
   transitionTo = (flowName: FlowName): void => {
+    if (flowName !== "answer" && flowName !== "external_answer") {
+      this.clearAnswerTimeout();
+    }
     this.syncWakeListenerForFlow(flowName);
     console.log(`[${getCurrentTimeTag()}] switch to:`, flowName);
     this.stateMachine.transitionTo(flowName);

@@ -32,10 +32,43 @@ export class StreamResponser {
   private isPlaying: boolean = false;
   private ttsChain: Promise<void> = Promise.resolve();
   private hasStartedTTS: boolean = false;
+  private stopAfterCurrentAudio: boolean = false;
+  private outputWindowClosed: boolean = false;
   private ttsReqId: number = 0;
   private chunkMaxChars: number = parseInt(process.env.TTS_CHUNK_MAX_CHARS || "48", 10);
   private chunkMaxWaitMs: number = parseInt(process.env.TTS_CHUNK_MAX_WAIT_MS || "650", 10);
+  private chunkMinChars: number = Math.max(12, Math.floor(this.chunkMaxChars * 0.6));
+  private chunkLookaheadChars: number = Math.max(16, Math.floor(this.chunkMaxChars * 0.4));
   private lastChunkTs: number = Date.now();
+
+  private findSafeChunkCut = (text: string): number => {
+    if (!text || text.length < this.chunkMinChars) {
+      return -1;
+    }
+
+    const leftWindow = text.slice(0, this.chunkMaxChars);
+    const leftCut = Math.max(
+      leftWindow.lastIndexOf(" "),
+      leftWindow.lastIndexOf(","),
+      leftWindow.lastIndexOf(";"),
+      leftWindow.lastIndexOf(":"),
+      leftWindow.lastIndexOf("."),
+      leftWindow.lastIndexOf("!"),
+      leftWindow.lastIndexOf("?")
+    );
+    if (leftCut >= this.chunkMinChars) {
+      return leftCut + 1;
+    }
+
+    const rightLimit = Math.min(text.length, this.chunkMaxChars + this.chunkLookaheadChars);
+    const rightWindow = text.slice(this.chunkMaxChars, rightLimit);
+    const rightMatch = rightWindow.search(/[\s,;:.!?]/);
+    if (rightMatch >= 0) {
+      return this.chunkMaxChars + rightMatch + 1;
+    }
+
+    return -1;
+  };
 
   constructor(
     ttsFunc: TTSFunc,
@@ -90,7 +123,11 @@ export class StreamResponser {
         } catch (error) {
           console.error("Audio playback error:", error);
         }
-        currentIndex++;
+        if (this.stopAfterCurrentAudio) {
+          currentIndex = this.speakQueue.length;
+        } else {
+          currentIndex++;
+        }
         playNext();
       } else if (this.partialContent) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -105,6 +142,8 @@ export class StreamResponser {
         this.speakQueue = [];
         this.displaySentences.length = 0;
         this.hasStartedTTS = false;
+        this.stopAfterCurrentAudio = false;
+        this.outputWindowClosed = false;
       }
     };
     playNext();
@@ -124,6 +163,7 @@ export class StreamResponser {
   };
 
   partial = (text: string): void => {
+    if (this.outputWindowClosed) return;
     this.partialContent += text;
     // replace newlines with spaces
     this.partialContent = this.partialContent.replace(/\n/g, " ");
@@ -137,12 +177,12 @@ export class StreamResponser {
       now - this.lastChunkTs >= this.chunkMaxWaitMs;
 
     if (shouldForceChunk) {
-      // Low-latency fallback: emit a chunk even without sentence punctuation.
-      const chunk = this.partialContent.slice(0, this.chunkMaxChars);
-      const splitAt = Math.max(chunk.lastIndexOf(" "), chunk.lastIndexOf(","));
-      const cut = splitAt > 20 ? splitAt : this.chunkMaxChars;
-      const forced = this.partialContent.slice(0, cut).trim();
-      this.partialContent = this.partialContent.slice(cut).trim();
+      // Low-latency fallback: emit only when we can cut at a safe boundary.
+      const cut = this.findSafeChunkCut(this.partialContent);
+      const forced = cut > 0 ? this.partialContent.slice(0, cut).trim() : "";
+      if (cut > 0) {
+        this.partialContent = this.partialContent.slice(cut).trim();
+      }
       if (forced) {
         readySentences = [...readySentences, forced];
       }
@@ -180,6 +220,11 @@ export class StreamResponser {
   };
 
   endPartial = (): void => {
+    if (this.outputWindowClosed) {
+      this.partialContent = "";
+      this.parsedSentences.length = 0;
+      return;
+    }
     if (this.partialContent) {
       this.parsedSentences.push(this.partialContent);
       this.displaySentences.push(this.partialContent);
@@ -222,8 +267,18 @@ export class StreamResponser {
     this.isPlaying = false;
     this.ttsChain = Promise.resolve();
     this.hasStartedTTS = false;
+    this.stopAfterCurrentAudio = false;
+    this.outputWindowClosed = false;
     this.lastChunkTs = Date.now();
     this.playEndResolve();
     stopPlaying();
+  };
+
+  stopAfterCurrentChunk = (): void => {
+    // Soft stop: freeze new output while allowing current audio chunk to finish.
+    this.outputWindowClosed = true;
+    this.stopAfterCurrentAudio = true;
+    this.partialContent = "";
+    this.parsedSentences.length = 0;
   };
 }

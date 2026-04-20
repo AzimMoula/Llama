@@ -29,6 +29,7 @@ export interface ChatFlowContext {
   wakeSessionActive: boolean;
   wakeSessionStartAt: number;
   wakeSessionLastSpeechAt: number;
+  answerTimeoutMs: number;
   wakeSessionIdleTimeoutMs: number;
   wakeRecordMaxSec: number;
   wakeEndKeywords: string[];
@@ -44,6 +45,8 @@ export interface ChatFlowContext {
   partialThinkingCallback: (partialThinking: string) => void;
   startWakeSession: () => void;
   endWakeSession: () => void;
+  armAnswerTimeout: (flowName: "answer" | "external_answer") => void;
+  clearAnswerTimeout: () => void;
   shouldContinueWakeSession: () => boolean;
   shouldEndAfterAnswer: (text: string) => boolean;
   streamExternalReply: (text: string, emoji?: string) => Promise<void>;

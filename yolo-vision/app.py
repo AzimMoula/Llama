@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -78,6 +79,32 @@ CAMERA_SOURCES = [
     for parsed in (_parse_camera_source(item) for item in _camera_source_items)
     if parsed is not None
 ]
+
+
+def _append_discovered_camera_sources(sources):
+    # Merge env-configured sources with currently visible /dev/video* devices.
+    # This avoids hard failures when YOLO_CAMERA_SOURCES is set to a single index
+    # but the active camera is exposed on another index (common on SBCs/USB cams).
+    merged = list(sources)
+    seen = {str(item) for item in merged}
+    discovered_nodes = sorted(glob.glob("/dev/video*"))
+
+    for node in discovered_nodes:
+        if node not in seen:
+            merged.append(node)
+            seen.add(node)
+
+        match = re.search(r"(\d+)$", node)
+        if match:
+            idx = int(match.group(1))
+            if str(idx) not in seen:
+                merged.append(idx)
+                seen.add(str(idx))
+
+    return merged
+
+
+CAMERA_SOURCES = _append_discovered_camera_sources(CAMERA_SOURCES)
 if not CAMERA_SOURCES:
     CAMERA_SOURCES = [0]
 
