@@ -381,6 +381,11 @@ DEVICE = "cpu"
 COMPUTE_TYPE = "int8"    # Pi must use int8
 CPU_THREADS = int(os.getenv("FASTER_WHISPER_CPU_THREADS", "4"))
 VAD_FILTER = os.getenv("FASTER_WHISPER_VAD_FILTER", "false").strip().lower() in {"1", "true", "yes", "on"}
+BEAM_SIZE = int(os.getenv("FASTER_WHISPER_BEAM_SIZE", "2"))
+BEST_OF = int(os.getenv("FASTER_WHISPER_BEST_OF", "2"))
+TEMPERATURE = float(os.getenv("FASTER_WHISPER_TEMPERATURE", "0.0"))
+CONDITION_ON_PREVIOUS_TEXT = os.getenv("FASTER_WHISPER_CONDITION_ON_PREVIOUS_TEXT", "false").strip().lower() in {"1", "true", "yes", "on"}
+WITHOUT_TIMESTAMPS = os.getenv("FASTER_WHISPER_WITHOUT_TIMESTAMPS", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 # ---------- Initialization ----------
 app = Flask(__name__)
@@ -424,6 +429,14 @@ def recognize():
   file_path = data.get("filePath")
   b64_audio = data.get("base64")
   language = data.get("language")
+  initial_prompt = data.get("initial_prompt")
+
+  req_vad_filter = data.get("vad_filter")
+  req_beam_size = data.get("beam_size")
+  req_best_of = data.get("best_of")
+  req_temperature = data.get("temperature")
+  req_condition_on_previous_text = data.get("condition_on_previous_text")
+  req_without_timestamps = data.get("without_timestamps")
 
   if not file_path and not b64_audio:
     return jsonify({
@@ -442,21 +455,62 @@ def recognize():
       temp_file = save_base64_to_temp_file(b64_audio)
       audio_path = temp_file
 
-    # 2. Transcribe using file path
+    # 2. Resolve per-request decoding options (fallback to env defaults)
+    vad_filter = bool(req_vad_filter) if req_vad_filter is not None else VAD_FILTER
+    beam_size = int(req_beam_size) if req_beam_size is not None else BEAM_SIZE
+    best_of = int(req_best_of) if req_best_of is not None else BEST_OF
+    temperature = float(req_temperature) if req_temperature is not None else TEMPERATURE
+    condition_on_previous_text = (
+      bool(req_condition_on_previous_text)
+      if req_condition_on_previous_text is not None
+      else CONDITION_ON_PREVIOUS_TEXT
+    )
+    without_timestamps = (
+      bool(req_without_timestamps)
+      if req_without_timestamps is not None
+      else WITHOUT_TIMESTAMPS
+    )
+
+    # 3. Transcribe using file path
     segments, info = model.transcribe(
       audio_path,
       language=language,
-      vad_filter=VAD_FILTER
+      vad_filter=vad_filter,
+      beam_size=beam_size,
+      best_of=best_of,
+      temperature=temperature,
+      condition_on_previous_text=condition_on_previous_text,
+      without_timestamps=without_timestamps,
+      initial_prompt=initial_prompt,
     )
 
+    segments = list(segments)
     text = "".join(seg.text for seg in segments).strip()
+    segment_payload = []
+    for seg in segments[:16]:
+      segment_payload.append({
+        "start": float(getattr(seg, "start", 0.0) or 0.0),
+        "end": float(getattr(seg, "end", 0.0) or 0.0),
+        "text": str(getattr(seg, "text", "") or "").strip(),
+        "avg_logprob": float(getattr(seg, "avg_logprob", 0.0) or 0.0),
+        "no_speech_prob": float(getattr(seg, "no_speech_prob", 0.0) or 0.0),
+      })
 
     t1 = time.perf_counter()
 
     return jsonify({
       "recognition": text,
       "language": info.language,
-      "time_cost": round(t1 - t0, 3)
+      "time_cost": round(t1 - t0, 3),
+      "segments": segment_payload,
+      "decode": {
+        "vad_filter": vad_filter,
+        "beam_size": beam_size,
+        "best_of": best_of,
+        "temperature": temperature,
+        "condition_on_previous_text": condition_on_previous_text,
+        "without_timestamps": without_timestamps,
+      },
     })
 
   except Exception as e:

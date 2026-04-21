@@ -444,6 +444,14 @@ const alsaInputDevice =
   process.env.AUDIODEV || process.env.WAKE_WORD_AUDIO_DEVICE || "default";
 const audioInputChannel =
   (process.env.AUDIO_INPUT_CHANNEL || process.env.WAKE_WORD_AUDIO_CHANNEL || "1").trim();
+const getAudioInputChannelCount = (spec: string): number => {
+  const numbers = (spec.match(/\d+/g) || []).map((item) => parseInt(item, 10));
+  if (numbers.length === 0) {
+    return 1;
+  }
+  return Math.max(1, ...numbers);
+};
+const audioInputChannelCount = getAudioInputChannelCount(audioInputChannel);
 const audioInputHighpassHz = Math.max(
   0,
   parseInt(process.env.AUDIO_INPUT_HIGHPASS_HZ || "70", 10),
@@ -593,11 +601,12 @@ const recordAudio = async (
       "-t",
       recordFileFormat,
       "-c",
-      "1",
+      `${audioInputChannelCount}`,
       "-r",
       "16000",
       outputPath,
       "remix",
+      "-m",
       audioInputChannel,
       "highpass",
       `${audioInputHighpassHz}`,
@@ -689,11 +698,12 @@ const recordAudioForDuration = async (
       "-t",
       recordFileFormat,
       "-c",
-      "1",
+      `${audioInputChannelCount}`,
       "-r",
       "16000",
       outputPath,
       "remix",
+      "-m",
       audioInputChannel,
       "highpass",
       `${audioInputHighpassHz}`,
@@ -793,11 +803,12 @@ const recordAudioManually = (
       "-t",
       recordFileFormat,
       "-c",
-      "1",
+      `${audioInputChannelCount}`,
       "-r",
       "16000",
       outputPath,
       "remix",
+      "-m",
       audioInputChannel,
       "highpass",
       `${audioInputHighpassHz}`,

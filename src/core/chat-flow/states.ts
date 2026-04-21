@@ -993,12 +993,20 @@ export const flowStates: Record<FlowName, FlowStateHandler> = {
     });
 
     const wakeListenSec = Math.max(
-      3,
-      parseInt(process.env.WAKE_WORD_LISTEN_SEC || "10", 10),
+      4,
+      parseInt(process.env.WAKE_WORD_LISTEN_SEC || "12", 10),
     );
     const micReleaseDelayMs = Math.max(
-      0,
-      parseInt(process.env.WAKE_WORD_MIC_RELEASE_DELAY_MS || "120", 10),
+      120,
+      parseInt(process.env.WAKE_WORD_MIC_RELEASE_DELAY_MS || "650", 10),
+    );
+    const wakeMicBusyRetryCount = Math.max(
+      1,
+      parseInt(process.env.WAKE_WORD_MIC_BUSY_RETRY_COUNT || "3", 10),
+    );
+    const wakeMicBusyRetryDelayMs = Math.max(
+      250,
+      parseInt(process.env.WAKE_WORD_MIC_BUSY_RETRY_DELAY_MS || "700", 10),
     );
 
     const startWakeCapture = (retryCount: number = 0) => {
@@ -1016,10 +1024,12 @@ export const flowStates: Record<FlowName, FlowStateHandler> = {
         })
         .catch((err) => {
           const busyDevice =
-            String(err).includes("Device or resource busy") || Number(err) === 2;
-          if (busyDevice && retryCount < 1) {
-            console.warn("[Wake] Mic busy during wake capture, retrying once...");
-            setTimeout(() => startWakeCapture(retryCount + 1), 500);
+            String(err).toLowerCase().includes("device or resource busy") || Number(err) === 2;
+          if (busyDevice && retryCount < wakeMicBusyRetryCount) {
+            console.warn(
+              `[Wake] Mic busy during wake capture, retrying (${retryCount + 1}/${wakeMicBusyRetryCount}) in ${wakeMicBusyRetryDelayMs}ms...`,
+            );
+            setTimeout(() => startWakeCapture(retryCount + 1), wakeMicBusyRetryDelayMs);
             return;
           }
           console.error("Error during auto recording:", err);
@@ -1043,7 +1053,7 @@ export const flowStates: Record<FlowName, FlowStateHandler> = {
       parseInt(process.env.WHISPLAY_ASR_TIMEOUT_MS || "30000", 10),
     );
     const continueOnEmptyWakeAsr =
-      String(process.env.WAKE_WORD_CONTINUE_ON_EMPTY_ASR || "false").toLowerCase() === "true";
+      String(process.env.WAKE_WORD_CONTINUE_ON_EMPTY_ASR || "true").toLowerCase() === "true";
     const asrTimeoutHandle = setTimeout(() => {}, asrTimeoutMs);
     Promise.race([
       ctx.recognizeAudio(ctx.currentRecordFilePath, ctx.isFromWakeListening),
@@ -1092,7 +1102,7 @@ export const flowStates: Record<FlowName, FlowStateHandler> = {
       if (ctx.wakeSessionActive) {
         const emptyRetryLimit = Math.max(
           0,
-          parseInt(process.env.WAKE_WORD_EMPTY_ASR_RETRY_COUNT || "1", 10),
+          parseInt(process.env.WAKE_WORD_EMPTY_ASR_RETRY_COUNT || "3", 10),
         );
         if (ctx.wakeEmptyAsrRetries < emptyRetryLimit && ctx.shouldContinueWakeSession()) {
           ctx.wakeEmptyAsrRetries += 1;

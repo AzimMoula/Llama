@@ -1,5 +1,5 @@
 import { Type as GeminiType } from "@google/genai";
-import { get, isArray } from "lodash";
+import { get } from "lodash";
 import { FunctionCall } from "../type";
 import moment from "moment";
 import { exec } from "child_process";
@@ -13,9 +13,6 @@ dotenv.config();
 // 输出 [{"function":{"arguments":" {\"volume\": 21}","name":"setVolume"},"id":"call_wdpwgmiszun2ej6radzriaq0","index":0,"type":"function"}]
 export const combineFunction = (packages: FunctionCall[][]): FunctionCall[] => {
   return packages.reduce((callFunctions: FunctionCall[], itemArray) => {
-    if (!isArray(itemArray)) {
-      itemArray = [itemArray];
-    }
     itemArray.forEach((call) => {
       const index = call.index;
       if (callFunctions[index]) {

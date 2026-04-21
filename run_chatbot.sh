@@ -4,6 +4,14 @@ export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 
+# Guard against concurrent invocations (systemd + manual startup/compose).
+LOCK_FILE="/tmp/whisplay-chatbot.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "Another run_chatbot.sh instance is already active. Exiting to avoid Docker conflicts."
+  exit 0
+fi
+
 # Find the sound card index for wm8960soundcard when ALSA is available.
 card_index=""
 if [ -r "/proc/asound/cards" ]; then
@@ -123,11 +131,34 @@ else
   exit 1
 fi
 
+cleanup_conflicting_container() {
+  local cname="$1"
+  local cid
+  cid=$(docker ps -aq -f "name=^/${cname}$")
+  if [ -n "$cid" ]; then
+    echo "Removing pre-existing container with conflicting name: ${cname} (${cid})"
+    if ! docker rm -f "$cid"; then
+      echo "Docker remove failed for ${cname} via current user. Trying sudo fallback..."
+      sudo docker rm -f "$cid" || {
+        echo "Failed to remove conflicting container ${cname}."
+        echo "Run manually: sudo docker rm -f ${cid}"
+      }
+    fi
+  fi
+}
+
+# Fixed container_name entries can collide with stale/manual containers.
+cleanup_conflicting_container "yolo-vision"
+cleanup_conflicting_container "faster-whisper"
+cleanup_conflicting_container "llm-engine"
+cleanup_conflicting_container "piper-http"
+cleanup_conflicting_container "whisplay-chatbot"
+
 echo "Refreshing yolo-vision container to remap camera devices..."
-"${compose_cmd[@]}" -f docker/docker-compose.yml up -d --build --force-recreate yolo-vision
+"${compose_cmd[@]}" -f docker/docker-compose.yml up -d --build --force-recreate --remove-orphans yolo-vision
 
 echo "Starting chatbot service..."
-"${compose_cmd[@]}" -f docker/docker-compose.yml up -d --build chatbot
+"${compose_cmd[@]}" -f docker/docker-compose.yml up -d --build --force-recreate --remove-orphans chatbot
 
 # Tailing logs to keep the script running for systemd limits
 "${compose_cmd[@]}" -f docker/docker-compose.yml logs -f chatbot

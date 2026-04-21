@@ -33,7 +33,11 @@ export class WakeWordListener extends EventEmitter {
         if (line.startsWith("WAKE")) {
           this.emit("wake", line);
         } else if (line) {
-          console.log(`[WakeWord] ${line}`);
+          if (line.startsWith("[WakeWord]")) {
+            console.log(line);
+          } else {
+            console.log(`[WakeWord] ${line}`);
+          }
         }
         newlineIndex = this.buffer.indexOf("\n");
       }

@@ -101,6 +101,50 @@ def parse_wake_extra_phrases(value: str) -> List[str]:
     return [normalize_text_for_match(item) for item in raw_parts if item.strip()]
 
 
+def parse_candidate_specs(value: str) -> List[str]:
+    # Supports semicolon or newline separated values so channel specs like "1,2" stay intact.
+    if not value:
+        return []
+    raw_parts = re.split(r"[;\n]", value)
+    return [item.strip() for item in raw_parts if item.strip()]
+
+
+def _dedupe_keep_order(values: List[str]) -> List[str]:
+    return list(dict.fromkeys([item for item in values if item]))
+
+
+def _infer_capture_channel_count(channel_spec: str) -> int:
+    numbers = [int(n) for n in re.findall(r"\d+", channel_spec or "")]
+    if not numbers:
+        return 1
+    return max(1, max(numbers))
+
+
+def build_capture_device_candidates() -> List[str]:
+    configured = (os.getenv("WAKE_WORD_AUDIO_DEVICE") or os.getenv("AUDIODEV") or "default").strip()
+    env_candidates = parse_candidate_specs(os.getenv("WAKE_WORD_AUDIO_DEVICE_CANDIDATES", ""))
+
+    candidates = [configured]
+    candidates.extend(env_candidates)
+    if configured.startswith("hw:"):
+        candidates.append(configured.replace("hw:", "plughw:", 1))
+    candidates.append("default")
+    return _dedupe_keep_order(candidates)
+
+
+def build_capture_channel_candidates() -> List[str]:
+    configured = (os.getenv("WAKE_WORD_AUDIO_CHANNEL") or os.getenv("AUDIO_INPUT_CHANNEL") or "1").strip()
+    env_candidates = parse_candidate_specs(os.getenv("WAKE_WORD_AUDIO_CHANNEL_CANDIDATES", ""))
+
+    candidates = [configured]
+    candidates.extend(env_candidates)
+    if configured != "1":
+        candidates.extend(["1", "2", "1,2"])
+    else:
+        candidates.extend(["2", "1,2"])
+    return _dedupe_keep_order(candidates)
+
+
 def truncate_for_log(value: str, max_len: int = 160) -> str:
     text = value.strip()
     if len(text) <= max_len:
@@ -291,6 +335,26 @@ def is_wake_match(
 
     target_tokens = list(dict.fromkeys([token for token in target_tokens if token]))
 
+    priority_tokens_env = os.getenv(
+        "WAKE_WORD_ASR_PRIORITY_TOKENS",
+        "sora,sorah,soora,suraa,zora,zara,sara,sarah",
+    )
+    priority_tokens = [
+        normalize_wake_token(item)
+        for item in parse_list(priority_tokens_env)
+        if item.strip()
+    ]
+    priority_tokens = list(dict.fromkeys([token for token in priority_tokens if token]))
+    require_priority_token = os.getenv("WAKE_WORD_ASR_REQUIRE_PRIORITY_TOKEN", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    # If no explicit priority tokens are configured, do not enforce priority matching.
+    if not priority_tokens:
+        require_priority_token = False
+
     for phrase in wake_phrases:
         canonical_phrase = " ".join(tokenize_normalized_text(phrase))
         if canonical_phrase and canonical_phrase in canonical_text:
@@ -298,6 +362,9 @@ def is_wake_match(
             phrase_has_target = any(token in target_tokens for token in phrase_tokens)
             phrase_has_prefix = any(token in prefix_tokens for token in phrase_tokens)
             phrase_has_hey = "hey" in phrase_tokens
+            phrase_has_priority = any(token in priority_tokens for token in phrase_tokens)
+            if require_priority_token and not phrase_has_priority:
+                continue
             if require_hey:
                 if phrase_has_target and phrase_has_hey:
                     return True, f"phrase:{canonical_phrase}"
@@ -308,7 +375,10 @@ def is_wake_match(
     joined = "".join(text_tokens)
     has_prefix_in_joined = any(prefix in joined for prefix in prefix_tokens)
     has_target_in_joined = any(target in joined for target in target_tokens)
+    has_priority_in_joined = any(priority in joined for priority in priority_tokens)
     if has_target_in_joined:
+        if require_priority_token and not has_priority_in_joined:
+            return False, "fused_missing_priority"
         if require_hey:
             if "hey" in joined:
                 return True, "fused:hey+target"
@@ -326,6 +396,14 @@ def is_wake_match(
         for token in text_tokens
         for target in target_tokens
     )
+    has_priority = any(
+        token_matches_target(token, priority, token_distance_limit)
+        for token in text_tokens
+        for priority in priority_tokens
+    )
+
+    if require_priority_token and not has_priority:
+        return False, "no_priority_token"
 
     if require_hey:
         if has_hey and has_target:
@@ -409,10 +487,11 @@ def recognize_text_with_asr(
     return ""
 
 
-def build_sox_capture_cmd() -> List[str]:
-    capture_device = os.getenv("WAKE_WORD_AUDIO_DEVICE") or os.getenv("AUDIODEV") or "default"
+def build_sox_capture_cmd(capture_device: str = "", capture_channel: str = "") -> List[str]:
+    capture_device = (capture_device or os.getenv("WAKE_WORD_AUDIO_DEVICE") or os.getenv("AUDIODEV") or "default").strip()
     gain_db = os.getenv("WAKE_WORD_ASR_GAIN_DB", "0").strip()
-    capture_channel = (os.getenv("WAKE_WORD_AUDIO_CHANNEL") or os.getenv("AUDIO_INPUT_CHANNEL") or "1").strip()
+    capture_channel = (capture_channel or os.getenv("WAKE_WORD_AUDIO_CHANNEL") or os.getenv("AUDIO_INPUT_CHANNEL") or "1").strip()
+    capture_channel_count = _infer_capture_channel_count(capture_channel)
     highpass_hz = max(0, int(os.getenv("WAKE_WORD_AUDIO_HIGHPASS_HZ", os.getenv("AUDIO_INPUT_HIGHPASS_HZ", "120"))))
     lowpass_hz = max(0, int(os.getenv("WAKE_WORD_AUDIO_LOWPASS_HZ", os.getenv("AUDIO_INPUT_LOWPASS_HZ", "4200"))))
     cmd = [
@@ -427,11 +506,12 @@ def build_sox_capture_cmd() -> List[str]:
         "-e",
         "signed-integer",
         "-c",
-        "1",
+        str(capture_channel_count),
         "-t",
         "raw",
         "-",
         "remix",
+        "-m",
         capture_channel,
         "highpass",
         str(highpass_hz),
@@ -456,10 +536,35 @@ def run_asr_wake_loop(wake_words: List[str], cooldown_sec: float) -> None:
     timeout_sec = float(os.getenv("WAKE_WORD_ASR_TIMEOUT_SEC", "12.0"))
     chunk_sec = float(os.getenv("WAKE_WORD_ASR_CHUNK_SEC", "1.8"))
     min_interval_sec = float(os.getenv("WAKE_WORD_ASR_MIN_INTERVAL_SEC", "1.2"))
-    min_rms = float(os.getenv("WAKE_WORD_ASR_MIN_RMS", "300"))
-    min_peak = float(os.getenv("WAKE_WORD_ASR_MIN_PEAK", "2200"))
-    min_voiced_amp = float(os.getenv("WAKE_WORD_ASR_MIN_VOICED_AMP", "700"))
-    min_voiced_ratio = float(os.getenv("WAKE_WORD_ASR_MIN_VOICED_RATIO", "0.08"))
+    min_rms = float(os.getenv("WAKE_WORD_ASR_MIN_RMS", "20"))
+    min_peak = float(os.getenv("WAKE_WORD_ASR_MIN_PEAK", "250"))
+    min_voiced_amp = float(os.getenv("WAKE_WORD_ASR_MIN_VOICED_AMP", "120"))
+    min_voiced_ratio = float(os.getenv("WAKE_WORD_ASR_MIN_VOICED_RATIO", "0.01"))
+    adaptive_gating = os.getenv("WAKE_WORD_ASR_ADAPTIVE_GATING", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    adaptive_rms_floor = float(os.getenv("WAKE_WORD_ASR_ADAPTIVE_RMS_FLOOR", "6"))
+    adaptive_peak_floor = float(os.getenv("WAKE_WORD_ASR_ADAPTIVE_PEAK_FLOOR", "120"))
+    adaptive_rms_multiplier = float(os.getenv("WAKE_WORD_ASR_ADAPTIVE_RMS_MULTIPLIER", "3.0"))
+    adaptive_peak_multiplier = float(os.getenv("WAKE_WORD_ASR_ADAPTIVE_PEAK_MULTIPLIER", "4.0"))
+    adaptive_voiced_ratio_floor = float(os.getenv("WAKE_WORD_ASR_ADAPTIVE_VOICED_RATIO_FLOOR", "0.001"))
+    effective_rms_ceiling = float(os.getenv("WAKE_WORD_ASR_EFFECTIVE_RMS_CEILING", "12"))
+    effective_peak_ceiling = float(os.getenv("WAKE_WORD_ASR_EFFECTIVE_PEAK_CEILING", "380"))
+    effective_voiced_ratio_ceiling = float(os.getenv("WAKE_WORD_ASR_EFFECTIVE_VOICED_RATIO_CEILING", "0.01"))
+    force_probe_when_gated = os.getenv("WAKE_WORD_ASR_FORCE_PROBE_WHEN_GATED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    force_probe_interval_sec = float(os.getenv("WAKE_WORD_ASR_FORCE_PROBE_INTERVAL_SEC", "2.4"))
+    silent_peak_threshold = float(os.getenv("WAKE_WORD_ASR_SILENT_PEAK_THRESHOLD", "1.5"))
+    silent_rms_threshold = float(os.getenv("WAKE_WORD_ASR_SILENT_RMS_THRESHOLD", "0.8"))
+    silent_restart_chunks = max(3, int(os.getenv("WAKE_WORD_ASR_SILENT_RESTART_CHUNKS", "8")))
+    max_silent_restarts = max(1, int(os.getenv("WAKE_WORD_ASR_MAX_SILENT_RESTARTS", "20")))
     timeout_backoff_sec = float(os.getenv("WAKE_WORD_ASR_TIMEOUT_BACKOFF_SEC", "4.0"))
     max_backoff_sec = float(os.getenv("WAKE_WORD_ASR_MAX_BACKOFF_SEC", "15.0"))
     error_backoff_sec = float(os.getenv("WAKE_WORD_ASR_ERROR_BACKOFF_SEC", "8.0"))
@@ -549,19 +654,63 @@ def run_asr_wake_loop(wake_words: List[str], cooldown_sec: float) -> None:
         passive_wait_loop()
         return
 
-    sox_cmd = build_sox_capture_cmd()
-    print(f"[WakeWord] Capture command: {' '.join(sox_cmd)}")
+    capture_devices = build_capture_device_candidates()
+    capture_channels = build_capture_channel_candidates()
+    capture_device_idx = 0
+    capture_channel_idx = 0
+
+    def start_capture_process():
+        selected_device = capture_devices[capture_device_idx]
+        selected_channel = capture_channels[capture_channel_idx]
+        sox_cmd = build_sox_capture_cmd(selected_device, selected_channel)
+        print(f"[WakeWord] Capture command: {' '.join(sox_cmd)}")
+        print(
+            "[WakeWord] Capture source "
+            f"device={selected_device} channel={selected_channel} "
+            f"(device#{capture_device_idx + 1}/{len(capture_devices)}, "
+            f"channel#{capture_channel_idx + 1}/{len(capture_channels)})"
+        )
+        return subprocess.Popen(
+            sox_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def rotate_capture_source(reason: str) -> bool:
+        nonlocal process, capture_device_idx, capture_channel_idx
+        prev_device_idx = capture_device_idx
+        prev_channel_idx = capture_channel_idx
+
+        capture_channel_idx += 1
+        if capture_channel_idx >= len(capture_channels):
+            capture_channel_idx = 0
+            capture_device_idx = (capture_device_idx + 1) % len(capture_devices)
+
+        if (
+            capture_device_idx == prev_device_idx
+            and capture_channel_idx == prev_channel_idx
+        ):
+            return False
+
+        print(
+            "[WakeWord] Switching capture source "
+            f"reason={reason} next_device={capture_devices[capture_device_idx]} "
+            f"next_channel={capture_channels[capture_channel_idx]}"
+        )
+        try:
+            process.terminate()
+        except Exception:
+            pass
+        process = start_capture_process()
+        return True
+
     print(
         "[WakeWord] WAITING FOR WAKE WORD "
         f"(listen={chunk_sec:.1f}s chunks, min_interval={min_interval_sec:.1f}s, "
         f"timeout={timeout_sec:.1f}s, backoff={timeout_backoff_sec:.1f}s)"
     )
 
-    process = subprocess.Popen(
-        sox_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    process = start_capture_process()
 
     def cleanup(*_) -> None:
         try:
@@ -588,9 +737,27 @@ def run_asr_wake_loop(wake_words: List[str], cooldown_sec: float) -> None:
     skipped_interval = 0
     skipped_backoff = 0
     recent_transcripts: List[tuple[float, str]] = []
+    ema_noise_rms = 0.0
+    ema_noise_peak = 0.0
+    last_forced_probe = 0.0
+    consecutive_silent_chunks = 0
+    silent_restart_count = 0
     print("[WakeWord] READY (ASR fallback mode)", flush=True)
     if bypass_gating:
         print("[WakeWord] ASR gating bypass enabled for diagnostics.", flush=True)
+    if adaptive_gating:
+        print(
+            "[WakeWord] ASR adaptive gating enabled "
+            f"(rms_floor={adaptive_rms_floor}, peak_floor={adaptive_peak_floor}, "
+            f"rms_mult={adaptive_rms_multiplier}, peak_mult={adaptive_peak_multiplier})",
+            flush=True,
+        )
+    if force_probe_when_gated:
+        print(
+            "[WakeWord] ASR forced idle probe enabled "
+            f"(interval={force_probe_interval_sec:.1f}s)",
+            flush=True,
+        )
 
     while True:
         if process.stdout is None:
@@ -626,34 +793,88 @@ def run_asr_wake_loop(wake_words: List[str], cooldown_sec: float) -> None:
         mean_abs = float(np.mean(abs_audio))
         peak_abs = float(np.max(abs_audio))
         voiced_ratio = float(np.mean(abs_audio >= min_voiced_amp))
+        ema_noise_rms = (0.98 * ema_noise_rms + 0.02 * mean_abs) if ema_noise_rms > 0 else mean_abs
+        ema_noise_peak = (0.98 * ema_noise_peak + 0.02 * peak_abs) if ema_noise_peak > 0 else peak_abs
+
+        if peak_abs <= silent_peak_threshold and mean_abs <= silent_rms_threshold:
+            consecutive_silent_chunks += 1
+        else:
+            consecutive_silent_chunks = 0
+
+        if (
+            consecutive_silent_chunks >= silent_restart_chunks
+            and silent_restart_count < max_silent_restarts
+        ):
+            silent_restart_count += 1
+            consecutive_silent_chunks = 0
+            switched = rotate_capture_source(
+                reason=f"digital_silence(mean={mean_abs:.1f},peak={peak_abs:.1f})"
+            )
+            if switched:
+                # Let ALSA settle briefly before reading from the new source.
+                time.sleep(0.15)
+                continue
+
+        effective_min_rms = min_rms
+        effective_min_peak = min_peak
+        effective_min_voiced_ratio = min_voiced_ratio
+        if adaptive_gating:
+            adaptive_rms_gate = max(adaptive_rms_floor, ema_noise_rms * adaptive_rms_multiplier)
+            adaptive_peak_gate = max(adaptive_peak_floor, ema_noise_peak * adaptive_peak_multiplier)
+            effective_min_rms = min(min_rms, adaptive_rms_gate)
+            effective_min_peak = min(min_peak, adaptive_peak_gate)
+            effective_min_voiced_ratio = min(min_voiced_ratio, adaptive_voiced_ratio_floor)
+
+        effective_min_rms = min(effective_min_rms, effective_rms_ceiling)
+        effective_min_peak = min(effective_min_peak, effective_peak_ceiling)
+        effective_min_voiced_ratio = min(effective_min_voiced_ratio, effective_voiced_ratio_ceiling)
 
         if debug_enabled and now - last_debug_log >= debug_log_interval_sec:
             print(
                 "[WakeWord] ASR monitor "
                 f"mean={mean_abs:.1f} peak={peak_abs:.1f} voiced={voiced_ratio:.3f} "
-                f"thresholds(rms>={min_rms},peak>={min_peak},voiced>={min_voiced_ratio}) "
+                "thresholds("
+                f"rms>={effective_min_rms:.1f}/{min_rms:.1f},"
+                f"peak>={effective_min_peak:.1f}/{min_peak:.1f},"
+                f"voiced>={effective_min_voiced_ratio:.3f}/{min_voiced_ratio:.3f}"
+                ") "
+                f"noise(rms={ema_noise_rms:.1f},peak={ema_noise_peak:.1f}) "
                 f"stats(sent={sent_requests},skip_rms={skipped_low_energy},skip_peak={skipped_low_peak},"
                 f"skip_voiced={skipped_low_voiced},skip_cd={skipped_cooldown},skip_itv={skipped_interval},skip_bk={skipped_backoff})"
             )
             last_debug_log = now
 
+        forced_probe_reason = ""
+        forced_probe = False
+        gate_passed = True
         if not bypass_gating:
-            if mean_abs < min_rms:
+            if mean_abs < effective_min_rms:
                 skipped_low_energy += 1
-                continue
-            if peak_abs < min_peak:
+                gate_passed = False
+                forced_probe_reason = f"low_rms({mean_abs:.1f}<{effective_min_rms:.1f})"
+            elif peak_abs < effective_min_peak:
                 skipped_low_peak += 1
-                continue
-            if voiced_ratio < min_voiced_ratio:
+                gate_passed = False
+                forced_probe_reason = f"low_peak({peak_abs:.1f}<{effective_min_peak:.1f})"
+            elif voiced_ratio < effective_min_voiced_ratio:
                 skipped_low_voiced += 1
-                continue
+                gate_passed = False
+                forced_probe_reason = f"low_voiced({voiced_ratio:.3f}<{effective_min_voiced_ratio:.3f})"
+
+            if not gate_passed:
+                if force_probe_when_gated and (now - last_forced_probe) >= force_probe_interval_sec:
+                    forced_probe = True
+                    last_forced_probe = now
+                else:
+                    continue
 
         last_request = now
         sent_requests += 1
         if debug_enabled:
             print(
                 "[WakeWord] ASR request -> /recognize "
-                f"(sent={sent_requests}, gate=passed, rms={mean_abs:.1f}, peak={peak_abs:.1f}, voiced={voiced_ratio:.3f})"
+                f"(sent={sent_requests}, gate={'forced_probe' if forced_probe else 'passed'}, "
+                f"reason={forced_probe_reason or 'ok'}, rms={mean_abs:.1f}, peak={peak_abs:.1f}, voiced={voiced_ratio:.3f})"
             )
 
         try:
