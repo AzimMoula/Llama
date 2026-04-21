@@ -135,16 +135,16 @@ def _is_local_camera_source(source) -> bool:
 
 
 def _open_local_capture(source):
-    api = cv2.CAP_V4L2
     cap = None
 
     if isinstance(source, int):
-        cap = cv2.VideoCapture(source, api)
+        cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
         if not cap.isOpened():
-            cap.release()
-            cap = cv2.VideoCapture(f"/dev/video{source}", api)
+            if cap is not None: cap.release()
+            cap = cv2.VideoCapture(source)
     else:
-        cap = cv2.VideoCapture(source, api)
+        # Avoid CAP_V4L2 with strings to prevent "capture by name" errors, fallback to auto
+        cap = cv2.VideoCapture(source)
 
     if cap and cap.isOpened():
         # Keep capture latency low on embedded devices.
@@ -623,6 +623,18 @@ def vision_loop():
                         history.append(frame_counts)
                         stable_counts = _smooth_counts()
 
+                        raw_boxes = []
+                        if hasattr(result, 'boxes') and len(result.boxes) > 0:
+                            for b in result.boxes:
+                                c_id = int(b.cls[0])
+                                box_name = model.names.get(c_id, str(c_id))
+                                bx1, by1, bx2, by2 = [int(v) for v in b.xyxy[0].tolist()]
+                                box_area = (bx2 - bx1) * (by2 - by1)
+                                raw_boxes.append({
+                                    "name": box_name, 
+                                    "box": {"x1": bx1, "y1": by1, "x2": bx2, "y2": by2, "area": box_area}
+                                })
+
                         latest_scene = _build_scene_text(stable_counts, color_by_name)
                         objects = [
                             {
@@ -651,6 +663,7 @@ def vision_loop():
                             latest_payload = {
                                 "scene": latest_scene,
                                 "objects": objects,
+                                "raw_boxes": raw_boxes,
                                 "color_observations": color_observations,
                                 "inference_ms": infer_ms,
                                 "device": DEVICE,

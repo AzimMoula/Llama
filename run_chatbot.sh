@@ -1,6 +1,6 @@
 #!/bin/bash
 # Set working directory
-export NVM_DIR="/home/pi/.nvm"
+export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 
@@ -103,16 +103,34 @@ fi
 #   SOUND_CARD_INDEX=$card_index yarn start
 # fi
 
-# if [ "$use_npm" = true ]; then
-#   echo "Using node to start the application..."
-#   SOUND_CARD_INDEX=$card_index node dist/index.js
-# else
-#   echo "Using node to start the application..."
-#   SOUND_CARD_INDEX=$card_index node dist/index.js
-# fi
+# Start the Docker Compose stack
+echo "Starting application via Docker Compose..."
 
-echo "Starting compiled Node.js application directly..."
-SOUND_CARD_INDEX=$card_index node dist/index.js
+camera_nodes=$(ls /dev/video* 2>/dev/null | tr '\n' ' ')
+if [ -n "$camera_nodes" ]; then
+  echo "Detected camera node(s): $camera_nodes"
+else
+  echo "Warning: no /dev/video* nodes detected on host before compose startup."
+fi
+
+compose_cmd=()
+if docker compose version >/dev/null 2>&1; then
+  compose_cmd=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  compose_cmd=(docker-compose)
+else
+  echo "Error: neither 'docker compose' nor 'docker-compose' is available in PATH."
+  exit 1
+fi
+
+echo "Refreshing yolo-vision container to remap camera devices..."
+"${compose_cmd[@]}" -f docker/docker-compose.yml up -d --build --force-recreate yolo-vision
+
+echo "Starting chatbot service..."
+"${compose_cmd[@]}" -f docker/docker-compose.yml up -d --build chatbot
+
+# Tailing logs to keep the script running for systemd limits
+"${compose_cmd[@]}" -f docker/docker-compose.yml logs -f chatbot
 
 # After the service ends, perform cleanup
 echo "Cleaning up after service..."

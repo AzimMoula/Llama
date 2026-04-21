@@ -1,18 +1,16 @@
 #!/bin/bash
 
-# if graphical interface is enabled, ask user whether to disable graphical interface
-if [ "$(systemctl get-default)" == "graphical.target" ]; then
-    echo "Graphical interface is currently enabled."
-    read -p "Disabling graphical interface is recommended for a headless setup. Do you want to disable the graphical interface? (y/n) " disable_gui
-    if [[ "$disable_gui" == "y" ]]; then
-        echo "Disabling graphical interface..."
-        sudo systemctl set-default multi-user.target
-        echo "Graphical interface disabled. You can re-enable it later with 'sudo systemctl set-default graphical.target'."
-    else
-        echo "Keeping graphical interface enabled."
-    fi
+# Ensure required scripts are executable so a single ./startup.sh is enough.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+chmod +x "$SCRIPT_DIR/startup.sh" "$SCRIPT_DIR/run_chatbot.sh" "$SCRIPT_DIR/launch_kiosk.sh" 2>/dev/null || true
+
+# Browser auto-launch requires graphical target.
+if [ "$(systemctl get-default)" != "graphical.target" ]; then
+    echo "Graphical interface is currently disabled. Enabling graphical target..."
+    sudo systemctl set-default graphical.target
+    echo "Graphical target enabled."
 else
-    echo "Graphical interface is currently disabled."
+    echo "Graphical interface is currently enabled."
 fi
 
 # Get user info
@@ -32,6 +30,14 @@ echo "Detected User: $TARGET_USER"
 echo "Detected Home: $USER_HOME"
 echo "Detected UID:  $TARGET_UID"
 
+if getent group docker >/dev/null 2>&1; then
+    if ! id -nG "$TARGET_USER" | grep -qw docker; then
+        echo "Adding $TARGET_USER to docker group for non-root docker access..."
+        sudo usermod -aG docker "$TARGET_USER"
+        echo "User added to docker group. Re-login or reboot is required for group changes to apply."
+    fi
+fi
+
 # Find Node bin
 NODE_BIN=$(which node)
 
@@ -45,22 +51,23 @@ echo "Found Node at: $NODE_FOLDER"
 echo "----------------------------------------"
 
 # Create the service file
-echo "Creating systemd service file..."
+PROJECT_DIR="$SCRIPT_DIR"
+echo "Creating systemd service file for project at $PROJECT_DIR..."
 sudo tee /etc/systemd/system/chatbot.service > /dev/null <<EOF
 [Unit]
 Description=Chatbot Service
-After=network.target sound.target
-Wants=sound.target
+After=network-online.target docker.service display-manager.service sound.target graphical.target
+Wants=network-online.target docker.service display-manager.service sound.target
 
 [Service]
 Type=simple
 User=$TARGET_USER
 Group=audio
-SupplementaryGroups=audio video gpio
+SupplementaryGroups=audio video gpio docker
 
-# Use the dynamic Home Directory
-WorkingDirectory=$USER_HOME/whisplay-ai-chatbot
-ExecStart=/bin/bash $USER_HOME/whisplay-ai-chatbot/run_chatbot.sh
+# Use the dynamic Project Directory
+WorkingDirectory=$PROJECT_DIR
+ExecStart=/bin/bash $PROJECT_DIR/run_chatbot.sh
 
 # Inject the dynamic Node path and dynamic User ID
 Environment=PATH=$NODE_FOLDER:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
@@ -72,21 +79,43 @@ Environment=NODE_ENV=production
 PrivateDevices=no
 
 # Logs
-StandardOutput=append:$USER_HOME/whisplay-ai-chatbot/chatbot.log
-StandardError=append:$USER_HOME/whisplay-ai-chatbot/chatbot.log
+StandardOutput=append:$PROJECT_DIR/chatbot.log
+StandardError=append:$PROJECT_DIR/chatbot.log
 
 Restart=always
 RestartSec=2
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
 EOF
+
+# Create a desktop autostart entry to launch browser in kiosk mode after user login.
+AUTOSTART_DIR="$USER_HOME/.config/autostart"
+mkdir -p "$AUTOSTART_DIR"
+
+cat > "$AUTOSTART_DIR/whisplay-kiosk.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Whisplay Kiosk
+Comment=Open Whisplay UI in full-screen kiosk mode
+Exec=/bin/bash $PROJECT_DIR/launch_kiosk.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-LXQt-Need-Tray=false
+EOF
+
+chmod +x "$PROJECT_DIR/launch_kiosk.sh"
+echo "Desktop autostart created at $AUTOSTART_DIR/whisplay-kiosk.desktop"
 
 # start the service
 echo "Service file created. Reloading Systemd..."
 sudo systemctl daemon-reload
 sudo systemctl enable chatbot.service
 sudo systemctl restart chatbot.service
+
+echo "Launching kiosk browser for current desktop session..."
+nohup /bin/bash "$PROJECT_DIR/launch_kiosk.sh" >/dev/null 2>&1 &
 
 echo "Done! Chatbot is starting..."
 echo "Checking status..."
