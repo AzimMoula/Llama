@@ -781,6 +781,7 @@ import {
   resetCameraModeControl,
 } from "./camera-mode";
 import { DEFAULT_EMOJI } from "../../utils";
+import { executeNavigationIntent, parseNavigationIntent } from "../../device/navigation";
 
 const normalizeWakePromptText = (value: string): string =>
   value
@@ -1219,6 +1220,35 @@ export const flowStates: Record<FlowName, FlowStateHandler> = {
     onButtonReleased(noop);
 
     const normalizedQuery = (ctx.asrText || "").toLowerCase();
+    const navIntent = parseNavigationIntent(ctx.asrText || "");
+    if (navIntent) {
+      display({
+        status: "navigating",
+        emoji: "🧭",
+        RGB: "#ffaa00",
+        text: `Navigating to ${navIntent.target}...`,
+      });
+
+      void executeNavigationIntent(navIntent)
+        .then(({ reply, detail, ok }) => {
+          if (currentAnswerId !== ctx.answerId || ctx.currentFlowName !== "answer") {
+            return;
+          }
+          console.log(`[Navigation] result=${ok ? "ok" : "fail"} detail=${detail}`);
+          partial(reply);
+          endPartial();
+        })
+        .catch((err) => {
+          if (currentAnswerId !== ctx.answerId || ctx.currentFlowName !== "answer") {
+            return;
+          }
+          console.error("[Navigation] Intent execution failed:", err);
+          partial("I could not run navigation due to a temporary control error.");
+          endPartial();
+        });
+      return;
+    }
+
     const isVisionQuery =
       /(what.*see|describe.*(scene|view|see)|who is there|what is in|how many|camera)/i.test(
         normalizedQuery,

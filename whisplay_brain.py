@@ -1,172 +1,231 @@
-import serial
-import time
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false
+
+import argparse
+import os
 import sys
-import requests
-import math
+import time
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
-# ==========================================
-# WHISPLAY - JETSON NANO BRAIN WITH VISION
-# ==========================================
+import requests  # type: ignore[reportMissingImports]
+import serial  # type: ignore[reportMissingImports]
 
-# 1. USB Connection Setup
-# Linux usually mounts Arduinos as ttyACM0. If it fails, check ttyUSB0.
-ARDUINO_PORT = '/dev/ttyACM0' 
-BAUD_RATE = 115200
-VISION_API_URL = "http://localhost:5000/scene"
 
-print(f"Connecting to Arduino on {ARDUINO_PORT}...")
-try:
-    arduino = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
-    time.sleep(2)  
-    print("Connection established!\n")
-except Exception as e:
-    print(f"FAILED TO CONNECT: {e}")
-    sys.exit()
+DEFAULT_BAUD_RATE = int(os.getenv("ARDUINO_BAUD_RATE", "115200"))
+DEFAULT_COMMAND_TIMEOUT_SEC = float(os.getenv("ARDUINO_COMMAND_TIMEOUT_SEC", "2.0"))
+DEFAULT_VISION_TIMEOUT_SEC = float(os.getenv("VISION_API_TIMEOUT_SEC", "2.0"))
+DEFAULT_VISION_API_URL = os.getenv("VISION_API_URL", "http://yolo-vision:5000/scene")
+DEFAULT_CAMERA_WIDTH = float(os.getenv("VISION_CAMERA_WIDTH", "640"))
+DEFAULT_CENTER_DEADZONE = float(os.getenv("VISION_CENTER_DEADZONE", "0.15"))
+DEFAULT_SEARCH_TURN_DEG = float(os.getenv("VISION_SEARCH_TURN_DEG", "15.0"))
 
-def send_command(cmd, value):
-    """Sends a string over USB and blocks Python until the Arduino replies."""
-    command_string = f"{cmd}:{value}\n"
-    print(f"Jetson sending:  {command_string.strip()}")
-    
-    arduino.write(command_string.encode('utf-8'))
-    
-    print("Waiting for Arduino to finish physical movement... ", end="", flush=True)
-    
-    start_time = time.time()
-    while True:
+
+def _normalize_name(value: str) -> str:
+    return " ".join((value or "").strip().lower().replace("_", " ").split())
+
+
+def _port_candidates() -> Iterable[str]:
+    explicit = (os.getenv("ARDUINO_PORT") or "").strip()
+    if explicit:
+        yield explicit
+    candidates_raw = os.getenv("ARDUINO_PORT_CANDIDATES", "/dev/ttyACM0,/dev/ttyUSB0")
+    seen: Set[str] = set()
+    for item in candidates_raw.split(","):
+        port = item.strip()
+        if not port or port in seen:
+            continue
+        seen.add(port)
+        yield port
+
+
+def _open_arduino() -> serial.Serial:
+    last_error: Optional[Exception] = None
+    for port in _port_candidates():
+        try:
+            print(f"[NAV] Connecting to Arduino on {port}...")
+            conn = serial.Serial(port, DEFAULT_BAUD_RATE, timeout=1)
+            time.sleep(1.5)
+            print(f"[NAV] Arduino connection established on {port}.")
+            return conn
+        except Exception as exc:  # pragma: no cover - hardware path
+            last_error = exc
+            print(f"[NAV] Failed on {port}: {exc}")
+    raise RuntimeError(f"Unable to connect to Arduino. Last error: {last_error}")
+
+
+def _send_command(arduino: serial.Serial, command: str, value: float) -> bool:
+    payload = f"{command}:{value}\n"
+    print(f"[NAV] -> {payload.strip()}")
+    arduino.write(payload.encode("utf-8"))
+    arduino.flush()
+
+    deadline = time.time() + DEFAULT_COMMAND_TIMEOUT_SEC
+    while time.time() < deadline:
         if arduino.in_waiting > 0:
-            response = arduino.readline().decode('utf-8').strip()
-            print(f"[{response}]", end="", flush=True) # Print whatever Arduino actually says
+            response = arduino.readline().decode("utf-8", errors="ignore").strip()
+            if response:
+                print(f"[NAV] <- {response}")
             if response == "DONE":
-                print("\n[DONE]")
-                break
-                
-        # Failsafe timeout to prevent the script from freezing forever
-        # Adjust 5.0s to however long your longest movement takes
-        if time.time() - start_time > 2.0:
-            print("\n[TIMEOUT - Proceeding anyway]")
-            break
-            
+                return True
         time.sleep(0.01)
 
-def get_vision_data():
-    """Fetches the latest bounding boxes from the YOLO container."""
+    print("[NAV] Movement command timeout; continuing with failsafe.")
+    return False
+
+
+def _fetch_vision(vision_url: str) -> Optional[Dict[str, Any]]:
     try:
-        resp = requests.get(VISION_API_URL, timeout=2)
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception as e:
-        print(f"Vision API error: {e}")
+        response = requests.get(vision_url, timeout=DEFAULT_VISION_TIMEOUT_SEC)
+        if response.status_code == 200:
+            return response.json()
+        print(f"[NAV] Vision API HTTP {response.status_code}")
+    except Exception as exc:
+        print(f"[NAV] Vision API error: {exc}")
     return None
 
-def move_towards_object(target_class="person", target_fill_ratio=0.7):
-    """
-    Finds the target object and moves towards it until its bounding box 
-    covers approximately `target_fill_ratio` of the camera's width/height.
-    """
-    print(f"\n--- Starting Vision Homing for '{target_class}' ---")
-    
-    # Camera resolution standard fallback based on our yolo settings
-    CAM_W = 640.0
-    CAM_H = 480.0
-    
-    while True:
-        time.sleep(0.1) # Add a small delay to avoid spamming the local Flask API and causing ConnectionResetError
-        data = get_vision_data()
-        if not data or 'raw_boxes' not in data:
-            print("No vision data yet, waiting...")
-            time.sleep(0.5)
+
+def _select_target(raw_boxes: Iterable[Dict[str, Any]], target_name: str) -> Optional[Dict[str, Any]]:
+    normalized_target = _normalize_name(target_name)
+    target_obj = None
+    for item in raw_boxes:
+        name = _normalize_name(str(item.get("name", "")))
+        if name != normalized_target:
             continue
-            
-        target_obj = None
-        # Find the largest bounding box matching our target class
-        for obj in data['raw_boxes']:
-            if obj['name'].lower() == target_class.lower():
-                if target_obj is None or obj['box']['area'] > target_obj['box']['area']:
-                    target_obj = obj
-                    
-        if not target_obj:
-            print(f"Cannot see '{target_class}'. Rotating to search...")
-            send_command("TRN_R", 15.0)  # Spin 15 degrees to look around
-            time.sleep(0.5)
-            continue
-            
-        # We found the target! Calculate its position and size
-        box = target_obj['box']
-        # x_min, y_min, x_max, y_max etc. Let's find center X
-        # Center of the box relative to image width (0 to 1) 
-        # But YOLO container usually sends normalized coordinates or pixel coordinates.
-        # Let's assume normalized ratio based on area if it's sent, or calculate from pixel bounds if sent.
-        # Handling the raw dict from ultralytics:
-        if 'x1' in box and 'x2' in box:
-            obj_w = box['x2'] - box['x1']
-            obj_center_x = box['x1'] + (obj_w / 2.0)
-            
-            # Normalize to -0.5 (left) to +0.5 (right)
-            offset_x = (obj_center_x / CAM_W) - 0.5
-            
-            # Width ratio (0.0 to 1.0)
-            fill_ratio = obj_w / CAM_W
-            
-            print(f"Target locked! Offset: {offset_x:.2f}, Fill: {fill_ratio:.2f}")
-            
-            # 1. Turn to center the object
-            if abs(offset_x) > 0.15: # Deadzone is 15% from center
-                # Scale turn angle by offset amount (up to 45 degrees max per adjustment)
-                turn_deg = abs(offset_x) * 60.0 
-                if offset_x > 0:
-                    send_command("TRN_R", round(turn_deg, 1))
-                else:
-                    send_command("TRN_L", round(turn_deg, 1))
-                time.sleep(0.5)
-                continue # Re-evaluate position before moving forward
-                
-            # 2. Check if we are close enough
-            if fill_ratio >= target_fill_ratio:
-                print(f"Target reached! (Fill ratio {fill_ratio:.2f} >= {target_fill_ratio})")
-                break
-                
-            # 3. Move forward towards it
-            # Drive distance inversely proportional to how close we are 
-            # If fill is 0.1, we move a lot. If fill is 0.6, we just nudge.
-            forward_dist = (target_fill_ratio - fill_ratio) * 100.0 # simple P-controller
-            forward_dist = max(10.0, min(forward_dist, 50.0)) # clamp between 10cm and 50cm
-            
-            send_command("FWD", round(forward_dist, 1))
-            time.sleep(0.5)
+        box_raw = item.get("box")
+        box: Dict[str, Any] = box_raw if isinstance(box_raw, dict) else {}
+        area = float(box.get("area", 0) or 0)
+
+        target_box_raw = (target_obj or {}).get("box") if target_obj else {}
+        target_box: Dict[str, Any] = (
+            target_box_raw if isinstance(target_box_raw, dict) else {}
+        )
+        if not target_obj or area > float(target_box.get("area", 0) or 0):
+            target_obj = item
+    return target_obj
+
+
+def _object_pose(target_obj: Dict[str, Any], frame_width: float) -> Optional[Tuple[float, float]]:
+    box_raw = target_obj.get("box")
+    box: Dict[str, Any] = box_raw if isinstance(box_raw, dict) else {}
+    if "x1" not in box or "x2" not in box:
+        return None
+    x1 = float(box["x1"])
+    x2 = float(box["x2"])
+    obj_w = max(0.0, x2 - x1)
+    center_x = x1 + (obj_w / 2.0)
+    offset_x = (center_x / frame_width) - 0.5
+    fill_ratio = obj_w / frame_width
+    return offset_x, fill_ratio
+
+
+def move_towards_object(
+    arduino: serial.Serial,
+    target_class: str,
+    target_fill_ratio: float,
+    max_steps: int,
+    vision_url: str,
+) -> str:
+    print(f"[NAV] Starting homing sequence: target='{target_class}', target_fill={target_fill_ratio:.2f}")
+    if max_steps <= 0:
+        return "invalid_config"
+
+    empty_reads = 0
+    target_misses = 0
+
+    for step in range(1, max_steps + 1):
+        payload = _fetch_vision(vision_url)
+        raw_boxes_raw = (payload or {}).get("raw_boxes") or []
+        if isinstance(raw_boxes_raw, list):
+            raw_boxes: List[Dict[str, Any]] = [
+                item for item in raw_boxes_raw if isinstance(item, dict)
+            ]
         else:
-            print("Bounding box coordinates not structured as expected.")
-            break
+            raw_boxes = []
 
-# ==========================================
-# THE AUTONOMOUS SEQUENCE
-# ==========================================
+        if not raw_boxes:
+            empty_reads += 1
+            print(f"[NAV] Step {step}/{max_steps}: no vision boxes yet.")
+            time.sleep(0.25)
+            continue
 
-print("Starting Autonomous Sequence in 3 seconds...\n")
-time.sleep(3)
+        target_obj = _select_target(raw_boxes, target_class)
+        if not target_obj:
+            target_misses += 1
+            print(f"[NAV] Step {step}/{max_steps}: target '{target_class}' not visible. Rotating search.")
+            _send_command(arduino, "TRN_R", round(DEFAULT_SEARCH_TURN_DEG, 1))
+            time.sleep(0.2)
+            continue
 
-# Define your path! You can mix normal moves and vision commands.
-# For vision, use action "VISION" and a dictionary of parameters.
-sequence_to_run = [
-    #("FWD", 30.0),   # Drive forward 30 cm
-    # ("TRN_R", 90.0), # Turn Right 90 degrees
-    ("VISION", {"target_class": "bottle", "target_fill_ratio": 0.7}) # Hunt a sports ball
-]
+        pose = _object_pose(target_obj, DEFAULT_CAMERA_WIDTH)
+        if not pose:
+            print(f"[NAV] Step {step}/{max_steps}: target box payload missing x1/x2.")
+            time.sleep(0.2)
+            continue
 
-# Run the sequence loop
-for step in sequence_to_run:
-    action = step[0]
-    amount = step[1]
-    
-    if action == "VISION":
-        # It's a vision command, extract params and run the vision function
-        target = amount.get("target_class", "person")
-        fill = amount.get("target_fill_ratio", 0.6)
-        move_towards_object(target_class=target, target_fill_ratio=fill)
-    else:
-        # It's a standard Arduino motor command
-        send_command(action, amount)
-        
-    time.sleep(0.5)
+        offset_x, fill_ratio = pose
+        print(
+            f"[NAV] Step {step}/{max_steps}: target locked | offset={offset_x:.3f}, fill={fill_ratio:.3f}")
 
-print("\nAll tasks finished.")
+        if abs(offset_x) > DEFAULT_CENTER_DEADZONE:
+            turn_deg = max(6.0, min(45.0, abs(offset_x) * 60.0))
+            _send_command(arduino, "TRN_R" if offset_x > 0 else "TRN_L", round(turn_deg, 1))
+            time.sleep(0.2)
+            continue
+
+        if fill_ratio >= target_fill_ratio:
+            print(
+                f"[NAV] Target reached with fill_ratio={fill_ratio:.3f} (goal={target_fill_ratio:.3f}).")
+            return "target_reached"
+
+        forward_dist = (target_fill_ratio - fill_ratio) * 100.0
+        forward_dist = max(8.0, min(forward_dist, 45.0))
+        _send_command(arduino, "FWD", round(forward_dist, 1))
+        time.sleep(0.2)
+
+    if empty_reads >= max_steps:
+        return "vision_unavailable"
+    if target_misses >= max_steps // 2:
+        return "target_not_found"
+    return "max_steps_exceeded"
+
+
+def _run() -> int:
+    parser = argparse.ArgumentParser(description="Whisplay motor + vision navigation controller")
+    parser.add_argument("--mode", choices=["vision", "motor"], required=True)
+    parser.add_argument("--target", default="person")
+    parser.add_argument("--fill", type=float, default=0.70)
+    parser.add_argument("--max-steps", type=int, default=int(os.getenv("NAVIGATION_MAX_STEPS", "28")))
+    parser.add_argument("--vision-url", default=DEFAULT_VISION_API_URL)
+    parser.add_argument("--action", choices=["FWD", "TRN_L", "TRN_R"], default="FWD")
+    parser.add_argument("--value", type=float, default=10.0)
+    args = parser.parse_args()
+
+    try:
+        arduino = _open_arduino()
+    except Exception as exc:
+        print(f"NAV_RESULT arduino_unavailable ({exc})")
+        return 20
+
+    try:
+        if args.mode == "vision":
+            result = move_towards_object(
+                arduino=arduino,
+                target_class=args.target,
+                target_fill_ratio=max(0.2, min(args.fill, 0.95)),
+                max_steps=max(1, args.max_steps),
+                vision_url=args.vision_url,
+            )
+            print(f"NAV_RESULT {result}")
+            return 0 if result == "target_reached" else 21
+
+        _send_command(arduino, args.action, args.value)
+        print("NAV_RESULT motor_command_sent")
+        return 0
+    finally:
+        try:
+            arduino.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    sys.exit(_run())

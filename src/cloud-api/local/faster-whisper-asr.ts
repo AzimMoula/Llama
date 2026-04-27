@@ -2,8 +2,8 @@ import axios from "axios";
 import dotenv from "dotenv";
 import { resolve } from "path";
 import { ASRServer } from "../../type";
-import { spawn } from "child_process";
-import { readFileSync, existsSync, statSync } from "fs";
+import { spawn, spawnSync } from "child_process";
+import { readFileSync, existsSync, statSync, unlinkSync } from "fs";
 
 dotenv.config();
 
@@ -16,6 +16,9 @@ const fasterWhisperHttpTimeoutMs = Math.max(
   3000,
   parseInt(process.env.FASTER_WHISPER_HTTP_TIMEOUT_MS || "25000", 10)
 );
+const asrRetryWithGain =
+  String(process.env.ASR_RETRY_WITH_GAIN || "true").toLowerCase() === "true";
+const asrRetryGainDb = parseFloat(process.env.ASR_RETRY_GAIN_DB || "18");
 
 let pyProcess: any = null;
 const asrServer = process.env.ASR_SERVER || "";
@@ -63,6 +66,34 @@ const buildWhisperBody = (
   return body;
 };
 
+const buildBoostedAudioCopy = (audioFilePath: string): string | null => {
+  const boostedPath = `${audioFilePath}.boosted.wav`;
+  try {
+    const result = spawnSync(
+      "sox",
+      [
+        audioFilePath,
+        boostedPath,
+        "gain",
+        `${asrRetryGainDb}`,
+        "gain",
+        "-n",
+      ],
+      { stdio: "pipe" }
+    );
+
+    if (result.status !== 0 || !existsSync(boostedPath)) {
+      const stderr = result.stderr?.toString() || "";
+      console.warn(`[ASR] Failed to build boosted audio copy: ${stderr}`);
+      return null;
+    }
+    return boostedPath;
+  } catch (error: any) {
+    console.warn(`[ASR] Exception while building boosted audio copy: ${error?.message || error}`);
+    return null;
+  }
+};
+
 const postRecognize = async (body: WhisperRequestBody): Promise<string> => {
   const response = await axios.post<FasterWhisperResponse>(
     `http://${fasterWhisperHost}:${fasterWhisperPort}/recognize`,
@@ -106,9 +137,37 @@ export const recognizeAudio = async (
     fasterWhisperRequestType === "base64" ? "base64" : "filePath";
 
   try {
-    return await postRecognize(
+    const firstPass = await postRecognize(
       buildWhisperBody(audioFilePath, normalizedRequestType)
     );
+    if (firstPass && firstPass.trim().length > 0) {
+      return firstPass;
+    }
+
+    if (!asrRetryWithGain) {
+      return "";
+    }
+
+    const boostedPath = buildBoostedAudioCopy(audioFilePath);
+    if (!boostedPath) {
+      return "";
+    }
+
+    try {
+      const retryPass = await postRecognize(
+        buildWhisperBody(boostedPath, normalizedRequestType)
+      );
+      if (retryPass && retryPass.trim().length > 0) {
+        console.log("[ASR] Recovered transcript via boosted-audio retry.");
+      }
+      return retryPass || "";
+    } finally {
+      try {
+        unlinkSync(boostedPath);
+      } catch {
+        // ignore cleanup errors
+      }
+    }
   } catch (error: any) {
     const responseError = error?.response?.data?.error;
     const status = error?.response?.status;

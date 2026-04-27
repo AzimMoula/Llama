@@ -10,7 +10,6 @@ import { DEFAULT_EMOJI, extractEmojis } from "../utils";
 import { StreamResponser } from "./StreamResponsor";
 import { recordingsDir } from "../utils/dir";
 import dotEnv from "dotenv";
-import { WakeWordListener } from "../device/wakeword";
 import { WhisplayIMBridgeServer } from "../device/im-bridge";
 import { FlowStateMachine } from "./chat-flow/stateMachine";
 import { flowStates } from "./chat-flow/states";
@@ -30,7 +29,7 @@ class ChatFlow implements ChatFlowContext {
   answerId: number = 0;
   enableCamera: boolean = false;
   knowledgePrompts: string[] = [];
-  wakeWordListener: WakeWordListener | null = null;
+  wakeWordListener: { start: () => void; stop: () => void } | null = null;
   wakeSessionActive: boolean = false;
   wakeSessionStartAt: number = 0;
   wakeSessionLastSpeechAt: number = 0;
@@ -116,16 +115,8 @@ class ChatFlow implements ChatFlowContext {
 
     this.transitionTo("sleep");
 
-    const wakeEnabled = (process.env.WAKE_WORD_ENABLED || "").toLowerCase();
-    if (wakeEnabled === "true") {
-      this.wakeWordListener = new WakeWordListener();
-      this.wakeWordListener.on("wake", () => {
-        if (this.currentFlowName === "sleep") {
-          this.startWakeSession();
-        }
-      });
-      this.wakeWordListener.start();
-    }
+
+    // Wakeword logic removed: now only button press triggers listening.
 
     if (isImMode) {
       this.whisplayIMBridge = new WhisplayIMBridgeServer();

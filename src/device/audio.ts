@@ -789,6 +789,7 @@ const recordAudioManually = (
   }
 
   let stopFunc: () => void = noop;
+  let stopRequested = false;
   const result = new Promise<string>((resolve, reject) => {
     const manualRecordGainDb = (
       process.env.WHISPLAY_MANUAL_RECORD_GAIN_DB ||
@@ -837,9 +838,26 @@ const recordAudioManually = (
     });
     recordingProcessList.push(recordingProcess);
     stopFunc = () => {
+      stopRequested = true;
       killAllRecordingProcesses();
     };
-    recordingProcess.on("exit", () => {
+    recordingProcess.on("exit", (code, signal) => {
+      // If stop() requested, treat termination as successful end-of-capture.
+      if (stopRequested) {
+        resolve(outputPath);
+        return;
+      }
+
+      // Unexpected non-zero exit means capture failed (e.g., ALSA device error).
+      if ((code ?? 0) !== 0) {
+        reject(
+          new Error(
+            `[Audio] Manual recording failed: sox exit code=${code} signal=${signal ?? ""}`,
+          ),
+        );
+        return;
+      }
+
       resolve(outputPath);
     });
   });

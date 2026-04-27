@@ -5,3 +5,5 @@ spidev
 opencv-python-headless
 Flask
 openwakeword
+requests
+pyserial
