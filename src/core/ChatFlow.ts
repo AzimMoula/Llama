@@ -11,6 +11,7 @@ import { StreamResponser } from "./StreamResponsor";
 import { recordingsDir } from "../utils/dir";
 import dotEnv from "dotenv";
 import { WhisplayIMBridgeServer } from "../device/im-bridge";
+import { WakeWordListener } from "../device/wakeword";
 import { FlowStateMachine } from "./chat-flow/stateMachine";
 import { flowStates } from "./chat-flow/states";
 import { ChatFlowContext, FlowName } from "./chat-flow/types";
@@ -29,7 +30,7 @@ class ChatFlow implements ChatFlowContext {
   answerId: number = 0;
   enableCamera: boolean = false;
   knowledgePrompts: string[] = [];
-  wakeWordListener: { start: () => void; stop: () => void } | null = null;
+  wakeWordListener: WakeWordListener | null = null;
   wakeSessionActive: boolean = false;
   wakeSessionStartAt: number = 0;
   wakeSessionLastSpeechAt: number = 0;
@@ -113,10 +114,17 @@ class ChatFlow implements ChatFlowContext {
       this.enableCamera = true;
     }
 
+    const wakeEnabled = (process.env.WAKE_WORD_ENABLED || "").toLowerCase() === "true";
+    if (wakeEnabled) {
+      this.wakeWordListener = new WakeWordListener();
+      this.wakeWordListener.on("wake", () => {
+        if (this.currentFlowName === "sleep") {
+          this.startWakeSession();
+        }
+      });
+    }
+
     this.transitionTo("sleep");
-
-
-    // Wakeword logic removed: now only button press triggers listening.
 
     if (isImMode) {
       this.whisplayIMBridge = new WhisplayIMBridgeServer();

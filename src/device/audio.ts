@@ -523,7 +523,7 @@ const killAllRecordingProcesses = (): void => {
 
     // Fallback: force-kill if SIGINT did not stop the recorder.
     setTimeout(() => {
-      if (child.killed) return;
+      if (child.exitCode !== null || child.signalCode !== null) return;
       try {
         child.kill("SIGKILL");
       } catch (e) { }

@@ -37,10 +37,6 @@ WAKE_WORD_MODEL_ALIASES = {
     "hey_lama": "hey_jarvis",
     "ok_lama": "hey_jarvis",
     "okay_lama": "hey_jarvis",
-    "sora": "hey_jarvis",
-    "hey_sora": "hey_jarvis",
-    "ok_sora": "hey_jarvis",
-    "okay_sora": "hey_jarvis",
 }
 
 
@@ -574,7 +570,7 @@ def run_asr_wake_loop(wake_words: List[str], cooldown_sec: float) -> None:
     bypass_gating = os.getenv("WAKE_WORD_ASR_BYPASS_GATING", "false").strip().lower() in {"1", "true", "yes", "on"}
     debug_enabled = os.getenv("WAKE_WORD_ASR_DEBUG", "true").strip().lower() in {"1", "true", "yes", "on"}
     debug_log_interval_sec = float(os.getenv("WAKE_WORD_ASR_DEBUG_LOG_INTERVAL_SEC", "5.0"))
-    token_distance_limit = int(os.getenv("WAKE_WORD_ASR_TOKEN_DISTANCE_LIMIT", "2"))
+    token_distance_limit = int(os.getenv("WAKE_WORD_ASR_TOKEN_DISTANCE_LIMIT", "3"))
     match_window_sec = float(os.getenv("WAKE_WORD_ASR_MATCH_WINDOW_SEC", "4.0"))
     extra_phrases_raw = os.getenv("WAKE_WORD_ASR_EXTRA_PHRASES", "")
     trace_transcripts = os.getenv("WAKE_WORD_ASR_TRACE_TRANSCRIPTS", "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -1011,7 +1007,11 @@ def discover_pretrained_model_paths() -> List[str]:
     return list(dict.fromkeys(discovered))
 
 
-def resolve_model_paths(model_names: List[str], discovered_paths: List[str]) -> List[str]:
+def resolve_model_paths(
+    model_names: List[str],
+    discovered_paths: List[str],
+    allow_fallback: bool = True,
+) -> List[str]:
     if not discovered_paths:
         return []
 
@@ -1027,13 +1027,13 @@ def resolve_model_paths(model_names: List[str], discovered_paths: List[str]) -> 
             resolved.append(by_id[model_name])
 
     # If requested names are unavailable, pick a reasonable default set.
-    if not resolved:
+    if not resolved and allow_fallback:
         fallback_ids = resolve_model_names(DEFAULT_MODEL_FALLBACKS)
         for model_id in fallback_ids:
             if model_id in by_id:
                 resolved.append(by_id[model_id])
 
-    if not resolved:
+    if not resolved and allow_fallback:
         resolved = discovered_paths[:1]
 
     return list(dict.fromkeys(resolved))
@@ -1052,12 +1052,22 @@ def main():
     cooldown_sec = float(os.getenv("WAKE_WORD_COOLDOWN_SEC", "1.5"))
     debug_enabled = os.getenv("WAKE_WORD_ASR_DEBUG", "true").strip().lower() in {"1", "true", "yes", "on"}
     debug_log_interval_sec = float(os.getenv("WAKE_WORD_ASR_DEBUG_LOG_INTERVAL_SEC", "5.0"))
+    force_asr = os.getenv("WAKE_WORD_FORCE_ASR_FALLBACK", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     if not wake_words and not model_paths:
         wake_words = ["sora"]
 
     model_names = resolve_model_names(wake_words)
     print(f"[WakeWord] Using wake words: {wake_words}")
+    if force_asr:
+        print("[WakeWord] Forced ASR fallback enabled; skipping model load.")
+        run_asr_wake_loop(wake_words, cooldown_sec=cooldown_sec)
+        return
     load_targets = []
     if model_paths:
         existing_paths = [path for path in model_paths if os.path.exists(path)]
@@ -1072,7 +1082,15 @@ def main():
         print(f"[WakeWord] Using custom model paths: {load_targets}")
     else:
         discovered_paths = discover_pretrained_model_paths()
-        resolved_paths = resolve_model_paths(model_names, discovered_paths)
+        requested_paths = resolve_model_paths(model_names, discovered_paths, allow_fallback=False)
+        if wake_words and not requested_paths:
+            print(
+                "[WakeWord] No exact model match for wake words; using ASR fallback.",
+                file=sys.stderr,
+            )
+            run_asr_wake_loop(wake_words, cooldown_sec=cooldown_sec)
+            return
+        resolved_paths = requested_paths or resolve_model_paths(model_names, discovered_paths)
         print(f"[WakeWord] Using model names: {model_names}")
         print(f"[WakeWord] Discovered pretrained model files: {len(discovered_paths)}")
         if resolved_paths:

@@ -17,6 +17,7 @@ DEFAULT_VISION_API_URL = os.getenv("VISION_API_URL", "http://yolo-vision:5000/sc
 DEFAULT_CAMERA_WIDTH = float(os.getenv("VISION_CAMERA_WIDTH", "640"))
 DEFAULT_CENTER_DEADZONE = float(os.getenv("VISION_CENTER_DEADZONE", "0.15"))
 DEFAULT_SEARCH_TURN_DEG = float(os.getenv("VISION_SEARCH_TURN_DEG", "15.0"))
+DEFAULT_SEARCH_FULL_ROTATIONS = float(os.getenv("VISION_SEARCH_FULL_ROTATIONS", "2.0"))
 
 
 def _normalize_name(value: str) -> str:
@@ -142,7 +143,9 @@ def move_towards_object(
         return "invalid_config"
 
     empty_reads = 0
-    target_misses = 0
+    saw_target = False
+    search_rotation_deg = 0.0
+    max_search_rotation_deg = max(0.0, DEFAULT_SEARCH_FULL_ROTATIONS * 360.0)
 
     for step in range(1, max_steps + 1):
         payload = _fetch_vision(vision_url)
@@ -162,12 +165,17 @@ def move_towards_object(
 
         target_obj = _select_target(raw_boxes, target_class)
         if not target_obj:
-            target_misses += 1
             print(f"[NAV] Step {step}/{max_steps}: target '{target_class}' not visible. Rotating search.")
             _send_command(arduino, "TRN_R", round(DEFAULT_SEARCH_TURN_DEG, 1))
+            search_rotation_deg += DEFAULT_SEARCH_TURN_DEG
+            if max_search_rotation_deg > 0 and search_rotation_deg >= max_search_rotation_deg:
+                print("[NAV] Search rotation limit reached; target not found.")
+                return "target_not_found"
             time.sleep(0.2)
             continue
 
+        saw_target = True
+        search_rotation_deg = 0.0
         pose = _object_pose(target_obj, DEFAULT_CAMERA_WIDTH)
         if not pose:
             print(f"[NAV] Step {step}/{max_steps}: target box payload missing x1/x2.")
@@ -196,7 +204,7 @@ def move_towards_object(
 
     if empty_reads >= max_steps:
         return "vision_unavailable"
-    if target_misses >= max_steps // 2:
+    if not saw_target:
         return "target_not_found"
     return "max_steps_exceeded"
 
