@@ -25,7 +25,7 @@ const normalizeText = (value: string): string =>
 const normalizeTarget = (raw: string): string => {
   let target = normalizeText(raw)
     .replace(/^(the|a|an|my|that|this)\s+/, "")
-    .replace(/\b(please|now|quickly|slowly|towards|toward|to)\b/g, " ")
+    .replace(/\b(please|now|quickly|slowly|towards|toward|to|for|near|at|on)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -62,6 +62,7 @@ const normalizeTarget = (raw: string): string => {
     laptop: "laptop",
     ball: "sports ball",
     sportsball: "sports ball",
+    bottom: "bottle",
   };
 
   const compact = target.replace(/\s+/g, "");
@@ -84,10 +85,32 @@ export const parseNavigationIntent = (transcript: string): NavigationIntent | nu
   const text = (transcript || "").trim();
   if (!text) return null;
 
-  const match = text.match(/^\s*(find|go\s+to)\s+(.+)$/i);
+  const normalizedText = normalizeText(text);
+  const directMatch =
+    /\b(?:move|more|go)?\s*(forward|backward|back)\b/.test(normalizedText) ||
+    /\b(?:turn|rotate)\s+(left|right)\b/.test(normalizedText) ||
+    /\bmove\s+(left|right)\b/.test(normalizedText);
+  if (directMatch) {
+    return {
+      verb: "go_to",
+      target: "direct_motor_command",
+      raw: text,
+    };
+  }
+
+  const match = text.match(
+    /^\s*(find|go\s+to|move\s+towards|move\s+to|approach|head\s+to|take\s+me\s+to)\s+(.+)$/i,
+  );
   if (!match) return null;
 
-  const verb = match[1].toLowerCase().startsWith("go") ? "go_to" : "find";
+  const rawVerb = match[1].toLowerCase();
+  const verb =
+    rawVerb.startsWith("go") ||
+    rawVerb.startsWith("move") ||
+    rawVerb.startsWith("head") ||
+    rawVerb.startsWith("take")
+      ? "go_to"
+      : "find";
   let targetRaw = (match[2] || "").trim();
 
   // Stop parsing at conversational conjunctions.
@@ -154,6 +177,97 @@ export const executeNavigationIntent = async (
   console.log(
     `[Navigation] Running intent=${intent.verb} target=${intent.target} fill=${fillRatio} maxSteps=${maxSteps}`,
   );
+
+  // Quick path: if user explicitly said move/turn with a numeric value,
+  // bypass vision and directly send motor commands.
+  const directCommands: Array<{
+    action: "FWD" | "REV" | "TRN_L" | "TRN_R";
+    value: number;
+    label: string;
+    index: number;
+  }> = [];
+
+  const moveRegex = /\b(?:move|more|go)?\s*(forward|backward|back)\b(?:\s+for)?\s*(?:around|about)?\s*(\d+(?:\.\d+)?)?/gi;
+  let match: RegExpExecArray | null;
+  while ((match = moveRegex.exec(intent.raw)) !== null) {
+    const dir = (match[1] || "").toLowerCase();
+    const parsed = match[2] ? parseFloat(match[2]) : NaN;
+    const value = Number.isFinite(parsed) ? parsed : 20.0;
+    const action = dir.startsWith("back") ? "REV" : "FWD";
+    const label = `${dir} ${value}`;
+    directCommands.push({ action, value, label, index: match.index });
+  }
+
+  const turnRegex = /\b(?:turn|rotate|move)\s+(left|right)\b(?:\s+for)?\s*(?:around|about)?\s*(\d+(?:\.\d+)?)?/gi;
+  while ((match = turnRegex.exec(intent.raw)) !== null) {
+    const dir = (match[1] || "").toLowerCase();
+    const parsed = match[2] ? parseFloat(match[2]) : NaN;
+    const value = Number.isFinite(parsed) ? parsed : 30.0;
+    const action = dir === "left" ? "TRN_L" : "TRN_R";
+    const label = `turn ${dir} ${value}`;
+    directCommands.push({ action, value, label, index: match.index });
+  }
+
+  if (directCommands.length > 0) {
+    directCommands.sort((a, b) => a.index - b.index);
+    console.log(
+      `[Navigation] Direct motor commands detected: ${directCommands
+        .map((cmd) => `${cmd.action}:${cmd.value}`)
+        .join(", ")}`,
+    );
+
+    const runMotorCommand = async (
+      action: "FWD" | "REV" | "TRN_L" | "TRN_R",
+      value: number,
+    ): Promise<{ ok: boolean; detail: string }> => {
+      const motorArgs = [
+        "-u",
+        navigationScriptPath,
+        "--mode",
+        "motor",
+        "--action",
+        action,
+        "--value",
+        String(value),
+      ];
+
+      const child = spawn(pythonBinary, motorArgs, {
+        env: { ...process.env, PYTHONUNBUFFERED: "1" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const outChunks: string[] = [];
+      const errChunks: string[] = [];
+      child.stdout?.on("data", (c: Buffer) => outChunks.push(c.toString()));
+      child.stderr?.on("data", (c: Buffer) => errChunks.push(c.toString()));
+      const closed = await new Promise<number>((resolve) => child.on("close", resolve));
+      const out = outChunks.join("") + errChunks.join("");
+      const res = parseNavResult(out) || (closed === 0 ? "motor_command_sent" : "motor_error");
+      return { ok: res === "motor_command_sent", detail: res };
+    };
+
+    try {
+      const labels: string[] = [];
+      for (const cmd of directCommands) {
+        const { ok, detail } = await runMotorCommand(cmd.action, cmd.value);
+        if (!ok) {
+          return {
+            ok: false,
+            reply: `Motor command failed (${detail}).`,
+            detail,
+          };
+        }
+        labels.push(cmd.label);
+      }
+      return {
+        ok: true,
+        reply: `Okay — ${labels.join(" then ")}.`,
+        detail: "motor_command_sent",
+      };
+    } catch (err: any) {
+      console.error("[Navigation] Direct motor spawn failed:", err);
+      return { ok: false, reply: "Failed to invoke motor controller.", detail: String(err) };
+    }
+  }
 
   const child = spawn(pythonBinary, args, {
     env: {

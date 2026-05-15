@@ -197,6 +197,18 @@ export const purifyTextForTTS = (text: string): string => {
     .trim();
 };
 
+export const isPromptEchoForTTS = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.startsWith("you are a camera-grounded assistant") ||
+    normalized.startsWith("camera_ground_truth:") ||
+    normalized.startsWith("camera_objects:") ||
+    normalized.startsWith("live camera context is unavailable") ||
+    normalized.startsWith("use the following knowledge to assist in answering the question:")
+  );
+};
+
 export const getRecordFileDurationMs = async (
   filePath: string
 ): Promise<number> => {

@@ -520,6 +520,14 @@ const killAllRecordingProcesses = (): void => {
     try {
       child.kill("SIGINT");
     } catch (e) { }
+
+    // Fallback: force-kill if SIGINT did not stop the recorder.
+    setTimeout(() => {
+      if (child.killed) return;
+      try {
+        child.kill("SIGKILL");
+      } catch (e) { }
+    }, 800);
   });
   recordingProcessList.length = 0;
 };

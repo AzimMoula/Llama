@@ -912,11 +912,10 @@ export const flowStates: Record<FlowName, FlowStateHandler> = {
     );
     const maxManualListenMs = Math.max(
       minManualRecordMs + 1000,
-      parseInt(process.env.WHISPLAY_MAX_MANUAL_LISTEN_MS || "12000", 10),
+      parseInt(process.env.WHISPLAY_MAX_MANUAL_LISTEN_MS || "20000", 10),
     );
     ctx.currentRecordFilePath = `${ctx.recordingsDir
       }/user-${Date.now()}.${recordFileFormat}`;
-    onButtonPressed(noop);
     const { result, stop } = recordAudioManually(ctx.currentRecordFilePath);
     let stopIssued = false;
 
@@ -930,6 +929,10 @@ export const flowStates: Record<FlowName, FlowStateHandler> = {
         image: "",
       });
     };
+
+    onButtonPressed(() => {
+      stopListeningCapture("button_press");
+    });
 
     const forcedStopTimer = setTimeout(() => {
       if (ctx.currentFlowName !== "listening") return;

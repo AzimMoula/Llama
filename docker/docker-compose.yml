@@ -214,7 +214,7 @@ services:
       - WAKE_WORD_EARLY_STOP_LEVEL_PERCENT=1.2
       - WAKE_WORD_RECORD_MAX_SEC=20
       - WHISPLAY_MIN_MANUAL_RECORD_MS=700
-      - WHISPLAY_MAX_MANUAL_LISTEN_MS=12000
+      - WHISPLAY_MAX_MANUAL_LISTEN_MS=20000
       - WHISPLAY_MANUAL_RECORD_GAIN_DB=14
       - ENABLE_CAMERA=true
       - WHISPLAY_CAMERA_DAEMON_ENABLED=false
@@ -263,6 +263,8 @@ services:
     privileged: true
     devices:                     
       - "/dev/snd:/dev/snd"
+      - "/dev/ttyACM0:/dev/ttyACM0"
+      - "/dev/ttyUSB0:/dev/ttyUSB0"
     depends_on:
       faster-whisper:
         condition: service_healthy

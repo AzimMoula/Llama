@@ -11,7 +11,7 @@ import serial  # type: ignore[reportMissingImports]
 
 
 DEFAULT_BAUD_RATE = int(os.getenv("ARDUINO_BAUD_RATE", "115200"))
-DEFAULT_COMMAND_TIMEOUT_SEC = float(os.getenv("ARDUINO_COMMAND_TIMEOUT_SEC", "2.0"))
+DEFAULT_COMMAND_TIMEOUT_SEC = float(os.getenv("ARDUINO_COMMAND_TIMEOUT_SEC", "8.0"))
 DEFAULT_VISION_TIMEOUT_SEC = float(os.getenv("VISION_API_TIMEOUT_SEC", "2.0"))
 DEFAULT_VISION_API_URL = os.getenv("VISION_API_URL", "http://yolo-vision:5000/scene")
 DEFAULT_CAMERA_WIDTH = float(os.getenv("VISION_CAMERA_WIDTH", "640"))
@@ -43,7 +43,13 @@ def _open_arduino() -> serial.Serial:
         try:
             print(f"[NAV] Connecting to Arduino on {port}...")
             conn = serial.Serial(port, DEFAULT_BAUD_RATE, timeout=1)
-            time.sleep(1.5)
+            # Many Arduino boards reset on serial open; give firmware time to boot.
+            time.sleep(2.0)
+            try:
+                conn.reset_input_buffer()
+                conn.reset_output_buffer()
+            except Exception:
+                pass
             print(f"[NAV] Arduino connection established on {port}.")
             return conn
         except Exception as exc:  # pragma: no cover - hardware path
@@ -52,8 +58,15 @@ def _open_arduino() -> serial.Serial:
     raise RuntimeError(f"Unable to connect to Arduino. Last error: {last_error}")
 
 
+def _format_command_value(value: float) -> str:
+    rounded = round(value)
+    if abs(value - rounded) < 1e-6:
+        return str(int(rounded))
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
 def _send_command(arduino: serial.Serial, command: str, value: float) -> bool:
-    payload = f"{command}:{value}\n"
+    payload = f"{command}:{_format_command_value(value)}\n"
     print(f"[NAV] -> {payload.strip()}")
     arduino.write(payload.encode("utf-8"))
     arduino.flush()
@@ -64,7 +77,7 @@ def _send_command(arduino: serial.Serial, command: str, value: float) -> bool:
             response = arduino.readline().decode("utf-8", errors="ignore").strip()
             if response:
                 print(f"[NAV] <- {response}")
-            if response == "DONE":
+            if response.upper() == "DONE":
                 return True
         time.sleep(0.01)
 
@@ -195,7 +208,7 @@ def _run() -> int:
     parser.add_argument("--fill", type=float, default=0.70)
     parser.add_argument("--max-steps", type=int, default=int(os.getenv("NAVIGATION_MAX_STEPS", "28")))
     parser.add_argument("--vision-url", default=DEFAULT_VISION_API_URL)
-    parser.add_argument("--action", choices=["FWD", "TRN_L", "TRN_R"], default="FWD")
+    parser.add_argument("--action", choices=["FWD", "REV", "TRN_L", "TRN_R"], default="FWD")
     parser.add_argument("--value", type=float, default=10.0)
     args = parser.parse_args()
 

@@ -1,4 +1,4 @@
-import { purifyTextForTTS, splitSentences } from "../utils";
+import { isPromptEchoForTTS, purifyTextForTTS, splitSentences } from "../utils";
 import dotenv from "dotenv";
 import { playAudioData, stopPlaying } from "../device/audio";
 import { TTSResult } from "../type";
@@ -200,6 +200,7 @@ export class StreamResponser {
         ttsPromise: Promise<TTSResult>;
       }[] = [];
       readySentences.forEach((sentence, index) => {
+        if (isPromptEchoForTTS(sentence)) return;
         const purified = purifyTextForTTS(sentence);
         if (!purified) return;
         const ttsPromise = this.enqueueTTS(purified);
@@ -236,6 +237,11 @@ export class StreamResponser {
       );
       if (this.partialContent.trim() !== "") {
         const text = purifyTextForTTS(this.partialContent);
+        if (isPromptEchoForTTS(text)) {
+          this.partialContent = "";
+          this.parsedSentences.length = 0;
+          return;
+        }
         const length = this.speakQueue.length;
         this.speakQueue.push({
           sentenceIndex: this.displaySentences.length - 1,
