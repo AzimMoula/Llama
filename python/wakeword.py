@@ -255,7 +255,21 @@ def normalize_wake_token(token: str) -> str:
 def tokenize_normalized_text(value: str) -> List[str]:
     if not value:
         return []
-    return [normalize_wake_token(t) for t in value.split() if t]
+    raw_tokens = [normalize_wake_token(t) for t in value.split() if t]
+    if not raw_tokens:
+        return []
+    merged: List[str] = []
+    i = 0
+    while i < len(raw_tokens):
+        token = raw_tokens[i]
+        nxt = raw_tokens[i + 1] if i + 1 < len(raw_tokens) else ""
+        if token in {"so", "su", "sa", "zo", "za", "sho", "sha", "suh", "soo", "sah"} and nxt in {"ra", "rah", "rra", "rrah"}:
+            merged.append("sora")
+            i += 2
+            continue
+        merged.append(token)
+        i += 1
+    return merged
 
 
 def token_matches_target(token: str, target: str, distance_limit: int) -> bool:
